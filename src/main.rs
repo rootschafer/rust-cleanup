@@ -1,62 +1,10 @@
-// use std::process::Command;
-// use walkdir::WalkDir;
-// use inquire::Confirm;
-//
-//
-// fn main() {
-//     let current_dir = std::env::current_dir().expect("Failed to get current directory");
-//     let mut skipped_projects = Vec::new();
-//
-//     for entry in WalkDir::new(current_dir) {
-//         let entry = entry.expect("Error accessing entry");
-//         if entry.file_type().is_dir() {
-//             let path = entry.path();
-//             if path.join("Cargo.toml").exists() {
-//                 handle_project(path, "Cargo.toml", "cargo clean", &mut skipped_projects);
-//             } else if path.join("Dioxus.toml").exists() {
-//                 handle_project(path, "Dioxus.toml", "dx clean", &mut skipped_projects);
-//             }
-//         }
-//     }
-//
-//     if !skipped_projects.is_empty() {
-//         println!("\nSkipped projects:");
-//         for path in skipped_projects {
-//             println!("{}", path.display());
-//         }
-//     }
-// }
-//
-// fn handle_project(path: &std::path::Path, project_type_file: &str, clean_command: &str, skipped_projects: &mut Vec<std::path::PathBuf>) {
-//     let message = if project_type_file == "Cargo.toml" {
-//         format!("{} is a rust project. Do you want to clean it?", path.display())
-//     } else {
-//         format!("{} seems to be a Dioxus project. Do you want to clean it?", path.display())
-//     };
-//
-//     let ans = Confirm::new(&message).prompt();
-//
-//     match ans {
-//         Ok(true) => {
-//             let status = Command::new(clean_command.split_whitespace().next().unwrap())
-//                 .args(clean_command.split_whitespace().skip(1))
-//                 .current_dir(path)
-//                 .status();
-//
-//             if let Err(e) = status {
-//                 eprintln!("Failed to run command: {}", e);
-//             }
-//         },
-//         Ok(false) => skipped_projects.push(path.to_path_buf()),
-//         Err(_) => {} // User pressed 'q' or Ctrl+C, do nothing
-//     }
-// }
-
-
+use std::{
+    io::{self, Write},
+    path::Path,
+};
 
 use clap::{Arg, ArgAction, Command};
 use walkdir::WalkDir;
-use std::io::{self, Write};
 
 fn main() {
     let matches = Command::new("rust-cleanup")
@@ -65,7 +13,7 @@ fn main() {
                 .short('p')
                 .long("path")
                 .value_name("PATH")
-                .help("Sets the starting directory for the search")
+                .help("Sets the starting directory for the search"),
         )
         .arg(
             Arg::new("yes-cargo")
@@ -88,7 +36,9 @@ fn main() {
         )
         .get_matches();
 
-    let start_path = matches.get_one::<String>("path").map_or(".", String::as_str);
+    let start_path = matches
+        .get_one::<String>("path")
+        .map_or(".", String::as_str);
     let yes_cargo = matches.get_flag("yes-cargo");
     let yes_dioxus = matches.get_flag("yes-dioxus");
     let yes_all = matches.get_flag("yes-all");
@@ -96,16 +46,17 @@ fn main() {
 
     let mut skipped_projects = Vec::new();
 
-    for entry in WalkDir::new(start_path)
-        .into_iter()
-        .filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(start_path).into_iter().filter_map(|e| e.ok()) {
         if entry.file_type().is_dir() {
             let path = entry.path();
-            if path.join("Cargo.toml").exists() {
-                handle_project(path, "Rust", "cargo clean", yes_cargo || yes_all, &mut skipped_projects);
-            } else if path.join("Dioxus.toml").exists() {
-                handle_project(path, "Dioxus", "dx clean", yes_dioxus || yes_all, &mut skipped_projects);
-            }
+
+            let project_type = ProjectType::new_from_path(path);
+            handle_project(
+                path,
+                &project_type,
+                project_type.should_autoclean(yes_dioxus, yes_cargo, yes_all),
+                &mut skipped_projects,
+            );
         }
     }
 
@@ -118,21 +69,60 @@ fn main() {
     }
 }
 
+#[derive(PartialEq, Clone)]
+enum ProjectType {
+    Regular,
+    Rust,
+    Dioxus,
+}
 
-fn handle_project(
-    path: &std::path::Path, 
-    project_type: &str, 
-    clean_cmd: &str, 
-    auto_clean: bool, 
-    skipped_projects: &mut Vec<std::path::PathBuf>
-) {
+impl ProjectType {
+    fn new_from_path(path: &Path) -> Self {
+        if path.join("Dioxus.toml").exists() {
+            Self::Dioxus
+        } else if path.join("Cargo.toml").exists() {
+            Self::Rust
+        } else {
+            Self::Regular
+        }
+    }
+    fn display_name(&self) -> &str {
+        match self {
+            Self::Regular => "Not a Rust project",
+            Self::Rust => "Rust",
+            Self::Dioxus => "Dioxus",
+        }
+    }
+
+    fn clean_cmd(&self) -> &str {
+        match self {
+            Self::Regular => "",
+            Self::Rust => "cargo clean",
+            Self::Dioxus => "dx clean",
+        }
+    }
+
+    fn should_autoclean(&self, yes_dioxus: bool, yes_cargo: bool, yes_all: bool) -> bool {
+        match self {
+            Self::Regular => false,
+            Self::Rust => yes_cargo || yes_all,
+            Self::Dioxus => yes_dioxus || yes_all,
+        }
+    }
+}
+
+fn handle_project(path: &Path, project_type: &ProjectType, auto_clean: bool, skipped_projects: &mut Vec<std::path::PathBuf>) {
+    if *project_type == ProjectType::Regular {
+        return;
+    }
+
     if auto_clean || prompt_user(path, project_type) {
-        let status = std::process::Command::new(clean_cmd.split_whitespace().next().unwrap())
-            .args(clean_cmd.split_whitespace().skip(1))
+        let status = std::process::Command::new(project_type.clean_cmd().split_whitespace().next().unwrap())
+            .args(project_type.clean_cmd().split_whitespace().skip(1))
             .current_dir(path)
             .status()
             .expect("Clean command failed");
-        
+
         if !status.success() {
             println!("There was an error cleaning {path:?}");
         }
@@ -141,8 +131,12 @@ fn handle_project(
     }
 }
 
-fn prompt_user(path: &std::path::Path, project_type: &str) -> bool {
-    print!("{} is a {} project. Do you want to clean it? (y/n): ", path.display(), project_type);
+fn prompt_user(path: &std::path::Path, project_type: &ProjectType) -> bool {
+    print!(
+        "{} is a {} project. Do you want to clean it? (y/n): ",
+        path.display(),
+        project_type.display_name()
+    );
     io::stdout().flush().unwrap();
 
     loop {
@@ -155,6 +149,7 @@ fn prompt_user(path: &std::path::Path, project_type: &str) -> bool {
             _ => {
                 print!("Invalid input. Try one of (y/n): ");
                 io::stdout().flush().unwrap();
-            },     }
+            }
+        }
     }
 }
