@@ -98,7 +98,7 @@ impl ProjectType {
 		match self {
 			Self::Regular => "",
 			Self::Rust => "cargo clean",
-			Self::Dioxus => "dx clean",
+			Self::Dioxus => "cargo clean", // diouxs now uses `cargo clean` to clean
 		}
 	}
 
@@ -122,16 +122,6 @@ fn handle_project(
 	}
 
 	if auto_clean || prompt_user(path, project_type) {
-		// let status = std::process::Command::new(project_type.clean_cmd().split_whitespace().next().unwrap())
-		//     .args(project_type.clean_cmd().split_whitespace().skip(1))
-		//     .current_dir(path)
-		//     .status()
-		//     .expect("Clean command failed");
-		//
-		// if !status.success() {
-		//     println!("There was an error cleaning {path:?}");
-		// }
-
 		match std::process::Command::new(project_type.clean_cmd().split_whitespace().next().unwrap())
 			.args(project_type.clean_cmd().split_whitespace().skip(1))
 			.current_dir(path)
