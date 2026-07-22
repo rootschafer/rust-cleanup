@@ -68,12 +68,34 @@ fn make_other_cache(dir: &Path) {
 	write(&dir.join("CACHEDIR.TAG"), OTHER_TAG);
 }
 
+/// Points the binary at a config file that doesn't exist, so a real
+/// `~/.config/rust-cleanup/config.toml` on the machine running the tests can
+/// never perturb them.
+fn no_config(root: &Path) -> std::path::PathBuf {
+	root.join("no-such-config.toml")
+}
+
 fn run(root: &Path, args: &[&str]) -> Output {
 	Command::new(bin())
 		.arg("--path")
 		.arg(root)
 		.args(args)
+		.env("RUST_CLEANUP_CONFIG", no_config(root))
 		.stdin(Stdio::null()) // closed stdin => any prompt answers "no"
+		.output()
+		.unwrap()
+}
+
+/// Runs against `config` (written next to the fixture) instead of the real one.
+fn run_with_config(root: &Path, config: &str, args: &[&str]) -> Output {
+	let cfg = root.join("rc-config.toml");
+	fs::write(&cfg, config).unwrap();
+	Command::new(bin())
+		.arg("--path")
+		.arg(root)
+		.args(args)
+		.env("RUST_CLEANUP_CONFIG", &cfg)
+		.stdin(Stdio::null())
 		.output()
 		.unwrap()
 }
@@ -83,6 +105,7 @@ fn run_input(root: &Path, args: &[&str], input: &str) -> Output {
 		.arg("--path")
 		.arg(root)
 		.args(args)
+		.env("RUST_CLEANUP_CONFIG", no_config(root))
 		.stdin(Stdio::piped())
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped())
@@ -99,6 +122,10 @@ fn run_input(root: &Path, args: &[&str], input: &str) -> Output {
 
 fn stdout(o: &Output) -> String {
 	String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+fn stderr(o: &Output) -> String {
+	String::from_utf8_lossy(&o.stderr).into_owned()
 }
 
 #[cfg(unix)]
@@ -647,4 +674,190 @@ fn show_size_reports_per_dir_size_and_a_freed_total() {
 	assert!(out.contains("MiB"), "per-dir size should be shown:\n{out}");
 	assert!(out.contains("Would free"), "a freed total should be shown:\n{out}");
 	assert!(t.path().join("a/target").exists(), "dry run deletes nothing");
+}
+
+// --- config file ----------------------------------------------------------
+
+#[test]
+fn config_can_enable_a_flag_the_cli_omits() {
+	let t = tmp();
+	make_build_dir(&t.path().join("loose")); // an orphan: needs --orphans
+
+	let o = run_with_config(t.path(), "orphans = true\nyes_all = true\n", &[]);
+
+	assert!(
+		!t.path().join("loose").exists(),
+		"config-set orphans + yes_all should remove the orphan:\n{}",
+		stdout(&o)
+	);
+	assert!(
+		stdout(&o).contains("enabled by the config file"),
+		"auto-cleaning from config should announce itself:\n{}",
+		stdout(&o)
+	);
+}
+
+#[test]
+fn config_show_size_applies_without_the_flag() {
+	let t = tmp();
+	make_crate(&t.path().join("a"), "a");
+	make_build_dir(&t.path().join("a/target"));
+	write(&t.path().join("a/target/debug/blob"), &"x".repeat(2 * 1024 * 1024));
+
+	let o = run_with_config(t.path(), "show_size = true\n", &["--dry-run"]);
+	let out = stdout(&o);
+
+	assert!(out.contains("MiB"), "config show_size shows per-dir sizes:\n{out}");
+	assert!(out.contains("Would free"), "and the freed total:\n{out}");
+}
+
+#[test]
+fn cli_option_overrides_the_config_value() {
+	let t = tmp();
+	// t(0) / deep(1) / proj(2) — reachable only at depth >= 2.
+	let proj = t.path().join("deep/proj");
+	make_crate(&proj, "proj");
+	make_build_dir(&proj.join("target"));
+
+	let cfg = "max_depth = 1\nyes_all = true\n";
+
+	run_with_config(t.path(), cfg, &[]);
+	assert!(proj.join("target").exists(), "config's max_depth = 1 applies");
+
+	run_with_config(t.path(), cfg, &["--max-depth", "5"]);
+	assert!(!proj.join("target").exists(), "the CLI's --max-depth wins");
+}
+
+#[test]
+fn config_ignore_paths_protects_a_subtree() {
+	let t = tmp();
+	let skipped = t.path().join("skip/proj");
+	make_crate(&skipped, "skipped");
+	make_build_dir(&skipped.join("target"));
+	let normal = t.path().join("normal");
+	make_crate(&normal, "normal");
+	make_build_dir(&normal.join("target"));
+
+	let cfg = format!(
+		"yes_all = true\nignore_paths = [\"{}\"]\n",
+		t.path().join("skip").display()
+	);
+	run_with_config(t.path(), &cfg, &[]);
+
+	assert!(skipped.join("target").exists(), "an ignored tree is never scanned");
+	assert!(!normal.join("target").exists(), "its siblings are still cleaned");
+}
+
+#[test]
+fn config_ignore_names_prunes_by_directory_name() {
+	let t = tmp();
+	let buried = t.path().join("vendor/proj");
+	make_crate(&buried, "buried");
+	make_build_dir(&buried.join("target"));
+
+	run_with_config(t.path(), "yes_all = true\nignore_names = [\"vendor\"]\n", &[]);
+
+	assert!(
+		buried.join("target").exists(),
+		"a dir named `vendor` should be pruned anywhere in the tree"
+	);
+}
+
+#[test]
+fn ignore_flag_protects_a_subtree_without_a_config() {
+	let t = tmp();
+	let skipped = t.path().join("skip/proj");
+	make_crate(&skipped, "skipped");
+	make_build_dir(&skipped.join("target"));
+	let normal = t.path().join("normal");
+	make_crate(&normal, "normal");
+	make_build_dir(&normal.join("target"));
+
+	let skip_arg = t.path().join("skip");
+	run(t.path(), &["--yes-all", "--ignore", skip_arg.to_str().unwrap()]);
+
+	assert!(skipped.join("target").exists(), "--ignore protects the subtree");
+	assert!(!normal.join("target").exists(), "and nothing else");
+}
+
+#[test]
+fn cli_ignore_adds_to_the_configs_ignore_paths() {
+	let t = tmp();
+	for name in ["from-config", "from-cli", "normal"] {
+		let p = t.path().join(name).join("proj");
+		make_crate(&p, "p");
+		make_build_dir(&p.join("target"));
+	}
+
+	let cfg = format!(
+		"yes_all = true\nignore_paths = [\"{}\"]\n",
+		t.path().join("from-config").display()
+	);
+	let cli_ignore = t.path().join("from-cli");
+	run_with_config(t.path(), &cfg, &["--ignore", cli_ignore.to_str().unwrap()]);
+
+	assert!(
+		t.path().join("from-config/proj/target").exists(),
+		"--ignore must not replace the config's list"
+	);
+	assert!(t.path().join("from-cli/proj/target").exists(), "--ignore applies too");
+	assert!(
+		!t.path().join("normal/proj/target").exists(),
+		"an un-ignored project is still cleaned"
+	);
+}
+
+#[test]
+fn malformed_config_warns_and_falls_back_to_defaults() {
+	let t = tmp();
+	make_crate(&t.path().join("a"), "a");
+	make_build_dir(&t.path().join("a/target"));
+
+	let o = run_with_config(t.path(), "orphan = true\nthis is not toml\n", &["--yes-all"]);
+
+	assert!(
+		stderr(&o).contains("invalid config"),
+		"a broken config should warn on stderr:\n{}",
+		stderr(&o)
+	);
+	assert!(!t.path().join("a/target").exists(), "the run still proceeds normally");
+}
+
+#[test]
+fn a_missing_config_behaves_like_no_config() {
+	let t = tmp();
+	make_crate(&t.path().join("a"), "a");
+	make_build_dir(&t.path().join("a/target"));
+
+	let o = Command::new(bin())
+		.arg("--path")
+		.arg(t.path())
+		.arg("--yes-all")
+		.env("RUST_CLEANUP_CONFIG", t.path().join("nope.toml"))
+		.stdin(Stdio::null())
+		.output()
+		.unwrap();
+
+	assert!(o.status.success());
+	assert!(
+		!stderr(&o).contains("Warning"),
+		"a missing config is the normal case — no warning:\n{}",
+		stderr(&o)
+	);
+	assert!(!t.path().join("a/target").exists());
+}
+
+#[test]
+fn config_keep_size_filters_like_the_flag() {
+	let t = tmp();
+	make_crate(&t.path().join("big"), "big");
+	make_build_dir(&t.path().join("big/target"));
+	write(&t.path().join("big/target/debug/blob"), &"x".repeat(2 * 1024 * 1024));
+	make_crate(&t.path().join("small"), "small");
+	make_build_dir(&t.path().join("small/target"));
+
+	run_with_config(t.path(), "yes_all = true\nkeep_size = \"1MiB\"\n", &[]);
+
+	assert!(!t.path().join("big/target").exists(), "large target cleaned");
+	assert!(t.path().join("small/target").exists(), "small target kept");
 }

@@ -1,0 +1,37 @@
+# rust-cleanup config — copy to ~/.config/rust-cleanup/config.toml
+#
+# Every key is optional, and a command-line flag always overrides the value here.
+# Unknown keys are an error (so a typo can't silently do nothing); an invalid
+# file warns and the run continues with the built-in defaults.
+
+# Default search dir when --path is omitted. A leading ~ is expanded.
+# path = "~/Code"
+
+# --- walk ---
+# follow_symlinks = false
+# max_depth = 8
+
+# --- cleaning (a CLI flag overrides these for that run) ---
+# orphans   = false   # also remove build dirs not inside any project
+# show_size = true    # show each build dir's size and a freed total
+# verbose   = false
+# dry_run   = false
+
+# Auto-clean without prompting. Powerful — enable deliberately. Runs that
+# auto-clean because of this file say so before doing anything.
+# yes_all    = false
+# yes_cargo  = false
+# yes_dioxus = false
+
+# --- filters (same meaning/polarity as the flags) ---
+# keep_days = 14          # keep dirs touched within the last N days
+# keep_size = "500MiB"    # only clean dirs at least this big
+
+# --- global ignore (never scanned, so never cleaned) ---
+# ignore_paths: whole trees, matched by path prefix. A leading ~ is expanded.
+# ignore_paths = [
+#   "~/Code/Rust/EMBED/ESP",   # vendored toolchains, etc.
+# ]
+# ignore_names: directory names pruned anywhere in the tree. These add to the
+# built-ins (.git, node_modules, .jj), which are always pruned.
+# ignore_names = ["vendor", "third_party"]

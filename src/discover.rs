@@ -11,6 +11,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
 use crate::cli::Flags;
+use crate::util::canonical_or;
 
 /// The cache-directory tag cargo drops into every build directory. Its body
 /// contains the word "cargo" (`... created by cargo.`), which lets us tell a
@@ -26,12 +27,23 @@ const DIOXUS_MANIFEST: &str = "Dioxus.toml";
 /// so `target` is intentionally not listed here — it might have been renamed.)
 const PRUNED_DIRS: [&str; 3] = [".git", "node_modules", ".jj"];
 
+/// The built-in pruned names, as the floor that a config's `ignore_names` adds
+/// to (the built-ins can be extended, never removed).
+pub(crate) fn default_ignore_names() -> HashSet<String> {
+	PRUNED_DIRS.iter().map(|n| (*n).to_string()).collect()
+}
+
 /// How the tree is traversed.
 pub(crate) struct WalkOptions {
 	/// Follow symlinked directories (off by default).
 	pub(crate) follow_symlinks: bool,
 	/// Maximum number of directory levels below the search root to descend.
 	pub(crate) max_depth: Option<usize>,
+	/// Directory names never descended into — a superset of `PRUNED_DIRS`.
+	pub(crate) ignore_names: HashSet<String>,
+	/// Canonicalized directory trees never descended into (prefix match, so a
+	/// whole subtree is skipped). Empty in the common case.
+	pub(crate) ignore_paths: Vec<PathBuf>,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -80,6 +92,8 @@ pub(crate) fn discover(start: &Path, options: WalkOptions) -> Discovery {
 	let ctx = WalkCtx {
 		follow_symlinks: options.follow_symlinks,
 		max_depth: options.max_depth,
+		ignore_names: options.ignore_names,
+		ignore_paths: options.ignore_paths,
 		// The cycle guard is only needed (and only paid for) when following symlinks;
 		// without them a directory tree can't contain a cycle.
 		visited: options.follow_symlinks.then(|| Mutex::new(HashSet::new())),
@@ -107,10 +121,24 @@ pub(crate) fn discover(start: &Path, options: WalkOptions) -> Discovery {
 struct WalkCtx {
 	follow_symlinks: bool,
 	max_depth: Option<usize>,
+	ignore_names: HashSet<String>,
+	ignore_paths: Vec<PathBuf>,
 	/// Canonical paths already visited, guarding against symlink cycles. `None`
 	/// when not following symlinks.
 	visited: Option<Mutex<HashSet<PathBuf>>>,
 	scanned: AtomicUsize,
+}
+
+impl WalkCtx {
+	/// Whether `dir` is inside one of the ignored trees. Costs nothing when no
+	/// ignore paths are configured; only then do we pay a canonicalize per dir.
+	fn is_ignored_path(&self, dir: &Path) -> bool {
+		if self.ignore_paths.is_empty() {
+			return false;
+		}
+		let canon = canonical_or(dir);
+		self.ignore_paths.iter().any(|ignored| canon.starts_with(ignored))
+	}
 }
 
 #[derive(Default)]
@@ -168,7 +196,8 @@ fn walk(dir: &Path, depth: usize, ctx: &WalkCtx) -> WalkResult {
 			|| (ctx.follow_symlinks && file_type.is_symlink() && entry.path().is_dir());
 
 		if is_dir {
-			if !name.is_some_and(|n| PRUNED_DIRS.contains(&n)) {
+			let pruned_by_name = name.is_some_and(|n| ctx.ignore_names.contains(n));
+			if !pruned_by_name && !ctx.is_ignored_path(&entry.path()) {
 				subdirs.push(entry.path());
 			}
 		} else if let Some(name) = name {
