@@ -59,6 +59,13 @@ fn main() {
 					 (e.g. left over from `cargo build --target-dir <dir>`)",
 				),
 		)
+		.arg(
+			Arg::new("verbose")
+				.short('v')
+				.long("verbose")
+				.action(ArgAction::SetTrue)
+				.help("List the projects that `cargo metadata` could not read"),
+		)
 		.get_matches();
 
 	let start_path = matches
@@ -69,10 +76,11 @@ fn main() {
 		yes_dioxus: matches.get_flag("yes-dioxus"),
 		yes_all: matches.get_flag("yes-all"),
 		orphans: matches.get_flag("orphans"),
+		verbose: matches.get_flag("verbose"),
 	};
 
 	let discovery = discover(Path::new(start_path));
-	let workspaces = build_plan(&discovery.candidates);
+	let (workspaces, failed) = build_plan(&discovery.candidates);
 
 	let mut skipped: Vec<PathBuf> = Vec::new();
 	let mut already_clean = 0usize;
@@ -151,7 +159,14 @@ fn main() {
 		}
 	}
 
-	print_summary(already_clean, detached_found, flags.orphans, &skipped);
+	print_summary(&Summary {
+		already_clean,
+		detached_found,
+		orphans_enabled: flags.orphans,
+		skipped: &skipped,
+		failed: &failed,
+		verbose: flags.verbose,
+	});
 }
 
 #[derive(Clone, Copy)]
@@ -160,6 +175,7 @@ struct Flags {
 	yes_dioxus: bool,
 	yes_all: bool,
 	orphans: bool,
+	verbose: bool,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -267,7 +283,7 @@ fn discover(start: &Path) -> Discovery {
 /// metadata` for each project's authoritative workspace root and build
 /// directory. Members of an already-resolved workspace are folded into it rather
 /// than queried again.
-fn build_plan(candidates: &[Candidate]) -> Vec<Workspace> {
+fn build_plan(candidates: &[Candidate]) -> (Vec<Workspace>, Vec<(PathBuf, String)>) {
 	// Shallow directories first: a workspace root is always shallower than its
 	// members, so we resolve the root (and learn its members) before we would ever
 	// reach a member on its own.
@@ -275,15 +291,33 @@ fn build_plan(candidates: &[Candidate]) -> Vec<Workspace> {
 	order.sort_by_key(|c| c.dir.components().count());
 
 	let mut workspaces: Vec<Workspace> = Vec::new();
+	let mut failed: Vec<(PathBuf, String)> = Vec::new();
 	let mut covered: HashSet<PathBuf> = HashSet::new();
+	// Directories of workspaces we've already handled (resolved or broken). Their
+	// non-member descendants are crates cargo rejects as detached; we skip them.
+	let mut handled_roots: Vec<PathBuf> = Vec::new();
 
 	for candidate in order {
 		if covered.contains(&candidate.dir) {
 			continue;
 		}
 
+		// A crate sitting inside an already-handled workspace but not among its
+		// members is one cargo refuses to resolve standalone ("believes it's in a
+		// workspace when it's not"). Skip the doomed `cargo metadata` call — its
+		// build dirs are still found and cleaned by the CACHEDIR.TAG scan. (Unless
+		// it declares its own `[workspace]`, i.e. it's an independent nested one.)
+		let detached = handled_roots
+			.iter()
+			.any(|root| candidate.dir.starts_with(root) && candidate.dir != *root);
+		if detached && !manifest_is_workspace_root(&candidate.dir) {
+			covered.insert(candidate.dir.clone());
+			continue;
+		}
+
 		match resolve_workspace(&candidate.dir) {
-			Some((root, target_dir, member_dirs)) => {
+			Ok((root, target_dir, member_dirs)) => {
+				handled_roots.push(canonical_or(&root));
 				workspaces.push(Workspace {
 					root,
 					target_dir,
@@ -291,18 +325,16 @@ fn build_plan(candidates: &[Candidate]) -> Vec<Workspace> {
 				});
 				covered.extend(member_dirs);
 			}
-			None => {
-				// `cargo metadata` failed (bad manifest, cargo missing, ...). Fall back
-				// to the safe default so the project is never silently ignored.
-				eprintln!(
-					"Warning: `cargo metadata` failed for {}; assuming a standalone project with a `target/` build dir.",
-					candidate.dir.display(),
-				);
-				workspaces.push(Workspace {
-					root: candidate.dir.clone(),
-					target_dir: candidate.dir.join("target"),
-					kind: candidate.kind,
-				});
+			Err(e) => {
+				// Expected for detached/broken/incomplete manifests. We don't fabricate
+				// a build dir here: the CACHEDIR.TAG scan handles any real one, whereas a
+				// fake resolved target would mask it from the scan and trigger a doomed
+				// `cargo clean`.
+				failed.push((candidate.dir.clone(), e.to_string()));
+				if manifest_is_workspace_root(&candidate.dir) {
+					// A broken workspace root; don't re-query each of its members.
+					handled_roots.push(candidate.dir.clone());
+				}
 			}
 		}
 
@@ -311,13 +343,12 @@ fn build_plan(candidates: &[Candidate]) -> Vec<Workspace> {
 		covered.insert(candidate.dir.clone());
 	}
 
-	workspaces
+	(workspaces, failed)
 }
 
 /// Runs `cargo metadata` for a manifest and returns `(workspace_root,
-/// target_directory, member_dirs)`. Returns `None` if cargo could not read the
-/// project.
-fn resolve_workspace(dir: &Path) -> Option<(PathBuf, PathBuf, Vec<PathBuf>)> {
+/// target_directory, member_dirs)`, or the error if cargo could not read it.
+fn resolve_workspace(dir: &Path) -> Result<(PathBuf, PathBuf, Vec<PathBuf>), cargo_metadata::Error> {
 	let metadata = MetadataCommand::new()
 		.manifest_path(dir.join("Cargo.toml"))
 		// Run from inside the project so cargo discovers project-local and global
@@ -325,8 +356,7 @@ fn resolve_workspace(dir: &Path) -> Option<(PathBuf, PathBuf, Vec<PathBuf>)> {
 		// working directory, not the manifest path.
 		.current_dir(dir)
 		.no_deps()
-		.exec()
-		.ok()?;
+		.exec()?;
 
 	let root = metadata.workspace_root.into_std_path_buf();
 	let target_dir = metadata.target_directory.into_std_path_buf();
@@ -341,7 +371,20 @@ fn resolve_workspace(dir: &Path) -> Option<(PathBuf, PathBuf, Vec<PathBuf>)> {
 		})
 		.collect();
 
-	Some((root, target_dir, member_dirs))
+	Ok((root, target_dir, member_dirs))
+}
+
+/// Whether `dir`'s `Cargo.toml` declares a workspace (`[workspace]` or any
+/// `[workspace.*]` table). Members inherit via `field.workspace = true`, which
+/// is not a table header, so this doesn't match them.
+fn manifest_is_workspace_root(dir: &Path) -> bool {
+	let Ok(contents) = fs::read_to_string(dir.join("Cargo.toml")) else {
+		return false;
+	};
+	contents
+		.lines()
+		.map(str::trim)
+		.any(|line| line == "[workspace]" || line.starts_with("[workspace."))
 }
 
 /// A workspace counts as Dioxus if the triggering crate or any member carries a
@@ -418,18 +461,42 @@ fn prompt(question: &str) -> bool {
 	}
 }
 
-fn print_summary(already_clean: usize, detached_found: usize, orphans_enabled: bool, skipped: &[PathBuf]) {
-	if already_clean > 0 {
-		println!("{already_clean} project(s) were already clean.");
+struct Summary<'a> {
+	already_clean: usize,
+	detached_found: usize,
+	orphans_enabled: bool,
+	skipped: &'a [PathBuf],
+	failed: &'a [(PathBuf, String)],
+	verbose: bool,
+}
+
+fn print_summary(summary: &Summary) {
+	if summary.already_clean > 0 {
+		println!("{} project(s) were already clean.", summary.already_clean);
 	}
-	if detached_found > 0 && !orphans_enabled {
+	if !summary.failed.is_empty() {
 		println!(
-			"Found {detached_found} orphaned Cargo build dir(s) not tied to any project; re-run with --orphans to remove them.",
+			"{} project(s) couldn't be read by `cargo metadata` (detached/broken manifests); their build dirs are still handled by the direct scan.",
+			summary.failed.len(),
+		);
+		if summary.verbose {
+			for (dir, err) in summary.failed {
+				let reason = err.lines().next().unwrap_or("").trim();
+				println!("  {}: {reason}", dir.display());
+			}
+		} else {
+			println!("  (re-run with -v to list them)");
+		}
+	}
+	if summary.detached_found > 0 && !summary.orphans_enabled {
+		println!(
+			"Found {} orphaned Cargo build dir(s) not tied to any project; re-run with --orphans to remove them.",
+			summary.detached_found,
 		);
 	}
-	if !skipped.is_empty() {
+	if !summary.skipped.is_empty() {
 		println!("Skipped:");
-		for path in skipped {
+		for path in summary.skipped {
 			println!("  {}", path.display());
 		}
 	}
