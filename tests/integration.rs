@@ -101,6 +101,12 @@ fn stdout(o: &Output) -> String {
 	String::from_utf8_lossy(&o.stdout).into_owned()
 }
 
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path) {
+	fs::create_dir_all(link.parent().unwrap()).unwrap();
+	std::os::unix::fs::symlink(target, link).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -355,4 +361,199 @@ fn nested_independent_workspace_is_also_cleaned() {
 	assert!(o.status.success());
 	assert!(!a.join("target").exists(), "outer workspace cleaned");
 	assert!(!b.join("target").exists(), "nested independent workspace cleaned");
+}
+
+// --- symlinks & depth -----------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn symlinks_are_not_followed_by_default() {
+	let t = tmp();
+	make_crate(&t.path().join("ext/proj"), "proj");
+	make_build_dir(&t.path().join("ext/proj/target"));
+	fs::create_dir_all(t.path().join("scan")).unwrap();
+	symlink(&t.path().join("ext"), &t.path().join("scan/link"));
+
+	run(&t.path().join("scan"), &["--yes-all"]);
+
+	assert!(
+		t.path().join("ext/proj/target").exists(),
+		"a project reachable only via a symlink must not be touched by default"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn follow_symlinks_reaches_linked_projects() {
+	let t = tmp();
+	make_crate(&t.path().join("ext/proj"), "proj");
+	make_build_dir(&t.path().join("ext/proj/target"));
+	fs::create_dir_all(t.path().join("scan")).unwrap();
+	symlink(&t.path().join("ext"), &t.path().join("scan/link"));
+
+	run(&t.path().join("scan"), &["--follow-symlinks", "--yes-all"]);
+
+	assert!(
+		!t.path().join("ext/proj/target").exists(),
+		"--follow-symlinks should reach the linked project and clean it"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_cycle_does_not_hang() {
+	let t = tmp();
+	let proj = t.path().join("proj");
+	make_crate(&proj, "proj");
+	make_build_dir(&proj.join("target"));
+	symlink(&proj, &proj.join("loop")); // self-referential link
+
+	// If the cycle guard were missing this would spin forever (test timeout).
+	let o = run(t.path(), &["--follow-symlinks", "--yes-all"]);
+
+	assert!(o.status.success());
+	assert!(!proj.join("target").exists(), "project still cleaned despite the cycle");
+}
+
+#[test]
+fn max_depth_bounds_the_search() {
+	let t = tmp();
+	// t(0) / deep(1) / proj(2)
+	let proj = t.path().join("deep/proj");
+	make_crate(&proj, "proj");
+	make_build_dir(&proj.join("target"));
+
+	run(t.path(), &["--max-depth", "1", "--yes-all"]);
+	assert!(proj.join("target").exists(), "depth 1 shouldn't reach proj at depth 2");
+
+	run(t.path(), &["--max-depth", "2", "--yes-all"]);
+	assert!(!proj.join("target").exists(), "depth 2 reaches and cleans proj");
+}
+
+#[test]
+fn max_depth_zero_scans_only_the_root() {
+	let t = tmp();
+	make_crate(&t.path().join("proj"), "proj");
+	make_build_dir(&t.path().join("proj/target"));
+
+	run(t.path(), &["--max-depth", "0", "--yes-all"]);
+
+	assert!(
+		t.path().join("proj/target").exists(),
+		"--max-depth 0 should not descend at all"
+	);
+}
+
+// --- weird workspace & build-dir setups -----------------------------------
+
+#[test]
+fn glob_workspace_members_are_cleaned_once() {
+	let t = tmp();
+	let ws = t.path().join("ws");
+	make_workspace(&ws, &["crates/*"]); // glob membership
+	make_crate(&ws.join("crates/x"), "x");
+	make_crate(&ws.join("crates/y"), "y");
+	make_build_dir(&ws.join("target"));
+
+	let o = run(t.path(), &["--yes-all"]);
+
+	assert!(o.status.success());
+	assert!(!ws.join("target").exists(), "globbed workspace cleaned at the root");
+}
+
+#[test]
+fn excluded_member_build_dir_is_still_removed_quietly() {
+	let t = tmp();
+	let ws = t.path().join("ws");
+	write(
+		&ws.join("Cargo.toml"),
+		"[workspace]\nresolver = \"2\"\nmembers = [\"a\"]\nexclude = [\"b\"]\n",
+	);
+	make_crate(&ws.join("a"), "a");
+	make_crate(&ws.join("b"), "b"); // excluded from the workspace
+	make_build_dir(&ws.join("b/target"));
+
+	let o = run(t.path(), &["--yes-all", "-v"]);
+
+	assert!(!ws.join("b/target").exists(), "excluded crate's build dir removed by scan");
+	assert!(
+		!stdout(&o).contains("couldn't be read"),
+		"an excluded crate isn't a metadata failure"
+	);
+}
+
+#[test]
+fn untagged_target_is_still_cleaned_by_cargo() {
+	let t = tmp();
+	let a = t.path().join("a");
+	make_crate(&a, "a");
+	// A `target/` with no CACHEDIR.TAG: the scan won't flag it, but it IS the
+	// resolved build dir, so pass-1 `cargo clean` must still remove it.
+	write(&a.join("target/junk"), "x");
+
+	run(t.path(), &["--yes-all"]);
+
+	assert!(!a.join("target").exists(), "cargo clean removes the resolved target");
+}
+
+#[test]
+fn projects_sharing_one_build_dir_are_deduped() {
+	let t = tmp();
+	let shared = t.path().join("shared-target");
+	for name in ["p1", "p2"] {
+		let p = t.path().join(name);
+		make_crate(&p, name);
+		write(
+			&p.join(".cargo/config.toml"),
+			&format!("[build]\ntarget-dir = \"{}\"\n", shared.display()),
+		);
+	}
+	make_build_dir(&shared);
+
+	let o = run(t.path(), &["--yes-all"]);
+
+	assert!(o.status.success());
+	assert!(!shared.exists(), "the shared build dir is cleaned exactly once");
+}
+
+#[test]
+fn project_at_the_search_root_is_cleaned() {
+	let t = tmp();
+	let proj = t.path().join("proj");
+	make_crate(&proj, "proj");
+	make_build_dir(&proj.join("target"));
+
+	run(&proj, &["--yes-all"]); // point --path straight at the crate
+
+	assert!(!proj.join("target").exists());
+}
+
+#[test]
+fn deeply_nested_workspace_members_are_covered() {
+	let t = tmp();
+	let ws = t.path().join("ws");
+	make_workspace(&ws, &["a/b/c"]);
+	make_crate(&ws.join("a/b/c"), "c");
+	make_build_dir(&ws.join("target"));
+
+	run(t.path(), &["--yes-all"]);
+
+	assert!(!ws.join("target").exists());
+}
+
+#[test]
+fn a_crate_inside_a_build_dir_is_ignored() {
+	let t = tmp();
+	let bd = t.path().join("bd");
+	make_build_dir(&bd); // a cargo build dir
+	// A stray crate accidentally sitting inside it, with its own build dir.
+	make_crate(&bd.join("nested"), "nested");
+	make_build_dir(&bd.join("nested/target"));
+
+	run(t.path(), &["--yes-all"]); // no --orphans
+
+	assert!(
+		bd.join("nested/target").exists(),
+		"we must not descend into a build dir, so anything inside it is untouched"
+	);
 }

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser};
 
 use crate::clean;
-use crate::discover::discover;
+use crate::discover::{WalkOptions, discover};
 use crate::plan::build_plan;
 
 /// Frees disk space by cleaning the build artifacts of Rust projects under a
@@ -15,6 +15,15 @@ pub struct Cli {
 	/// Sets the starting directory for the search
 	#[arg(short, long, value_name = "PATH", default_value = ".")]
 	pub path: PathBuf,
+
+	/// Follow symlinked directories while searching (off by default so the search
+	/// can't escape the tree; a cycle guard and --max-depth bound the traversal)
+	#[arg(short = 'L', long)]
+	pub follow_symlinks: bool,
+
+	/// Limit how many directory levels below the search root to descend
+	#[arg(short = 'd', long, value_name = "DEPTH")]
+	pub max_depth: Option<usize>,
 
 	#[command(flatten)]
 	pub flags: Flags,
@@ -55,7 +64,13 @@ pub fn run_cli() {
 
 	configure_thread_pool();
 
-	let discovery = discover(&cli.path);
+	let discovery = discover(
+		&cli.path,
+		WalkOptions {
+			follow_symlinks: cli.follow_symlinks,
+			max_depth: cli.max_depth,
+		},
+	);
 	let (workspaces, failed) = build_plan(&discovery.candidates);
 	clean::run(cli.flags, &discovery, &workspaces, &failed);
 }

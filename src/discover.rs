@@ -1,6 +1,8 @@
 use std::{
+	collections::HashSet,
 	fs,
 	path::{Path, PathBuf},
+	sync::Mutex,
 	sync::atomic::{AtomicUsize, Ordering},
 	time::Duration,
 };
@@ -23,6 +25,14 @@ const DIOXUS_MANIFEST: &str = "Dioxus.toml";
 /// Cargo project. (Build directories are pruned dynamically via `CACHEDIR_TAG`,
 /// so `target` is intentionally not listed here — it might have been renamed.)
 const PRUNED_DIRS: [&str; 3] = [".git", "node_modules", ".jj"];
+
+/// How the tree is traversed.
+pub(crate) struct WalkOptions {
+	/// Follow symlinked directories (off by default).
+	pub(crate) follow_symlinks: bool,
+	/// Maximum number of directory levels below the search root to descend.
+	pub(crate) max_depth: Option<usize>,
+}
 
 #[derive(PartialEq, Clone, Copy)]
 pub(crate) enum ProjectType {
@@ -61,22 +71,29 @@ pub(crate) struct Discovery {
 /// Walks the tree under `start` once, in parallel, collecting every Cargo
 /// project and every cargo-authored build directory. Prunes VCS/dependency
 /// trees by name and never descends into a cache directory (`CACHEDIR.TAG`).
-pub(crate) fn discover(start: &Path) -> Discovery {
+pub(crate) fn discover(start: &Path, options: WalkOptions) -> Discovery {
 	let spinner = ProgressBar::new_spinner();
 	spinner.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());
 	spinner.enable_steady_tick(Duration::from_millis(100));
 	spinner.set_message("Scanning for Rust projects…");
 
-	let scanned = AtomicUsize::new(0);
+	let ctx = WalkCtx {
+		follow_symlinks: options.follow_symlinks,
+		max_depth: options.max_depth,
+		// The cycle guard is only needed (and only paid for) when following symlinks;
+		// without them a directory tree can't contain a cycle.
+		visited: options.follow_symlinks.then(|| Mutex::new(HashSet::new())),
+		scanned: AtomicUsize::new(0),
+	};
 	let WalkResult {
 		candidates,
 		build_dirs,
-	} = walk(start, &scanned);
+	} = walk(start, 0, &ctx);
 
 	spinner.finish_and_clear();
 	println!(
 		"Scanned {} directories: found {} project(s) and {} build dir(s).",
-		scanned.load(Ordering::Relaxed),
+		ctx.scanned.load(Ordering::Relaxed),
 		candidates.len(),
 		build_dirs.len(),
 	);
@@ -85,6 +102,15 @@ pub(crate) fn discover(start: &Path) -> Discovery {
 		candidates,
 		build_dirs,
 	}
+}
+
+struct WalkCtx {
+	follow_symlinks: bool,
+	max_depth: Option<usize>,
+	/// Canonical paths already visited, guarding against symlink cycles. `None`
+	/// when not following symlinks.
+	visited: Option<Mutex<HashSet<PathBuf>>>,
+	scanned: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -105,9 +131,20 @@ impl WalkResult {
 /// subdirectories in parallel. Because we already hold the directory listing, we
 /// detect the `Cargo.toml`/`Dioxus.toml`/`CACHEDIR.TAG` markers from the entry
 /// names — no extra `stat` per candidate.
-fn walk(dir: &Path, scanned: &AtomicUsize) -> WalkResult {
-	scanned.fetch_add(1, Ordering::Relaxed);
+fn walk(dir: &Path, depth: usize, ctx: &WalkCtx) -> WalkResult {
+	ctx.scanned.fetch_add(1, Ordering::Relaxed);
 	let mut result = WalkResult::default();
+
+	// When following symlinks, skip any real directory we've already seen so a
+	// link back to an ancestor can't loop forever.
+	if let Some(visited) = &ctx.visited {
+		let Ok(canon) = dir.canonicalize() else {
+			return result;
+		};
+		if !visited.lock().unwrap().insert(canon) {
+			return result; // already visited via another path — symlink cycle
+		}
+	}
 
 	let Ok(entries) = fs::read_dir(dir) else {
 		return result; // unreadable (permissions, races) — skip quietly
@@ -125,9 +162,12 @@ fn walk(dir: &Path, scanned: &AtomicUsize) -> WalkResult {
 		let name = entry.file_name();
 		let name = name.to_str();
 
-		// `file_type` is not symlink-followed, so symlinked dirs are treated as
-		// files here and never recursed into — this is what stops walk cycles.
-		if file_type.is_dir() {
+		// `file_type` is not symlink-followed. A symlinked directory only counts as
+		// a directory to recurse into when --follow-symlinks is set.
+		let is_dir = file_type.is_dir()
+			|| (ctx.follow_symlinks && file_type.is_symlink() && entry.path().is_dir());
+
+		if is_dir {
 			if !name.is_some_and(|n| PRUNED_DIRS.contains(&n)) {
 				subdirs.push(entry.path());
 			}
@@ -165,10 +205,11 @@ fn walk(dir: &Path, scanned: &AtomicUsize) -> WalkResult {
 		// their own nested crates (fuzz/, xtask/, examples that are crates, …).
 	}
 
-	if !subdirs.is_empty() {
+	let may_descend = ctx.max_depth.is_none_or(|max| depth < max);
+	if may_descend && !subdirs.is_empty() {
 		let children = subdirs
 			.par_iter()
-			.map(|sub| walk(sub, scanned))
+			.map(|sub| walk(sub, depth + 1, ctx))
 			.reduce(WalkResult::default, WalkResult::merge);
 		result = result.merge(children);
 	}
