@@ -4,10 +4,13 @@ use std::{
 	io::{self, Write},
 	path::{Path, PathBuf},
 	process::Command as Process,
+	time::Duration,
 };
 
 use cargo_metadata::MetadataCommand;
-use clap::{Arg, ArgAction, Command};
+use clap::{Args, Parser};
+use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 use walkdir::{DirEntry, WalkDir};
 
 /// The cache-directory tag cargo drops into every build directory. Its body
@@ -22,65 +25,73 @@ const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
 /// so `target` is intentionally not listed here — it might have been renamed.)
 const PRUNED_DIRS: [&str; 3] = [".git", "node_modules", ".jj"];
 
+/// Frees disk space by cleaning the build artifacts of Rust projects under a
+/// directory. Already-clean projects are skipped, workspaces are cleaned once,
+/// and stray/orphaned build dirs are detected by cargo's `CACHEDIR.TAG`.
+#[derive(Parser)]
+#[command(name = "rust-cleanup", version, about)]
+struct Cli {
+	/// Sets the starting directory for the search
+	#[arg(short, long, value_name = "PATH", default_value = ".")]
+	path: PathBuf,
+
+	#[command(flatten)]
+	flags: Flags,
+}
+
+/// The auto-clean / behavior flags, shared with the cleaning logic. Kept as a
+/// small `Copy` bundle so it can be threaded through by value.
+#[derive(Args, Clone, Copy)]
+struct Flags {
+	/// Automatically clean non-Dioxus Rust projects without prompting
+	#[arg(long)]
+	yes_cargo: bool,
+
+	/// Automatically clean Dioxus projects without prompting
+	#[arg(long)]
+	yes_dioxus: bool,
+
+	/// Automatically clean all projects without prompting for a yes or a no
+	#[arg(short = 'y', long)]
+	yes_all: bool,
+
+	/// Also remove Cargo build dirs that aren't inside any discovered project
+	/// (e.g. left over from `cargo build --target-dir <dir>`)
+	#[arg(long)]
+	orphans: bool,
+
+	/// Show what would be cleaned without deleting anything or prompting
+	#[arg(short = 'n', long)]
+	dry_run: bool,
+
+	/// List the projects that `cargo metadata` could not read
+	#[arg(short, long)]
+	verbose: bool,
+}
+
 fn main() {
-	let matches = Command::new("rust-cleanup")
-		.arg(
-			Arg::new("path")
-				.short('p')
-				.long("path")
-				.value_name("PATH")
-				.help("Sets the starting directory for the search"),
-		)
-		.arg(
-			Arg::new("yes-cargo")
-				.long("yes-cargo")
-				.action(ArgAction::SetTrue)
-				.help("Automatically clean non-Dioxus Rust projects without prompting"),
-		)
-		.arg(
-			Arg::new("yes-dioxus")
-				.long("yes-dioxus")
-				.action(ArgAction::SetTrue)
-				.help("Automatically clean Dioxus projects without prompting"),
-		)
-		.arg(
-			Arg::new("yes-all")
-				.long("yes-all")
-				.short('y')
-				.action(ArgAction::SetTrue)
-				.help("Automatically clean all projects without prompting for a yes or a no"),
-		)
-		.arg(
-			Arg::new("orphans")
-				.long("orphans")
-				.action(ArgAction::SetTrue)
-				.help(
-					"Also remove Cargo build dirs that aren't inside any discovered project \
-					 (e.g. left over from `cargo build --target-dir <dir>`)",
-				),
-		)
-		.arg(
-			Arg::new("verbose")
-				.short('v')
-				.long("verbose")
-				.action(ArgAction::SetTrue)
-				.help("List the projects that `cargo metadata` could not read"),
-		)
-		.get_matches();
+	let cli = Cli::parse();
+	let flags = cli.flags;
 
-	let start_path = matches
-		.get_one::<String>("path")
-		.map_or(".", String::as_str);
-	let flags = Flags {
-		yes_cargo: matches.get_flag("yes-cargo"),
-		yes_dioxus: matches.get_flag("yes-dioxus"),
-		yes_all: matches.get_flag("yes-all"),
-		orphans: matches.get_flag("orphans"),
-		verbose: matches.get_flag("verbose"),
-	};
+	// `cargo metadata` calls are subprocess/I/O-bound, so we oversubscribe the
+	// core count to keep more of them in flight. Skip this if the user pinned
+	// RAYON_NUM_THREADS, and ignore the error if a pool already exists.
+	if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+		let threads = std::thread::available_parallelism()
+			.map_or(8, |n| n.get())
+			.saturating_mul(2)
+			.clamp(4, 32);
+		let _ = rayon::ThreadPoolBuilder::new()
+			.num_threads(threads)
+			.build_global();
+	}
 
-	let discovery = discover(Path::new(start_path));
+	let discovery = discover(&cli.path);
 	let (workspaces, failed) = build_plan(&discovery.candidates);
+
+	if flags.dry_run {
+		println!("Dry run — nothing will be deleted.");
+	}
 
 	let mut skipped: Vec<PathBuf> = Vec::new();
 	let mut already_clean = 0usize;
@@ -96,6 +107,16 @@ fn main() {
 		}
 		if !cleaned.insert(canonical_or(&ws.target_dir)) {
 			continue; // this build dir was already cleaned via another project
+		}
+
+		if flags.dry_run {
+			println!(
+				"Would clean {} ({} project) — build dir {}",
+				ws.root.display(),
+				ws.kind.display_name(),
+				ws.target_dir.display(),
+			);
+			continue;
 		}
 
 		let question = format!(
@@ -129,6 +150,14 @@ fn main() {
 		match containing_project(build_dir, &discovery.candidates) {
 			// Leftover sitting inside a known project: confidently that project's.
 			Some(project) => {
+				if flags.dry_run {
+					println!(
+						"Would remove stray build dir {} (inside {})",
+						build_dir.display(),
+						project.dir.display(),
+					);
+					continue;
+				}
 				let question = format!(
 					"{} is a stray Cargo build dir (not {}'s current build dir). Remove it?",
 					build_dir.display(),
@@ -144,6 +173,10 @@ fn main() {
 			None => {
 				if !flags.orphans {
 					detached_found += 1;
+					continue;
+				}
+				if flags.dry_run {
+					println!("Would remove orphaned build dir {}", build_dir.display());
 					continue;
 				}
 				let question = format!(
@@ -167,15 +200,6 @@ fn main() {
 		failed: &failed,
 		verbose: flags.verbose,
 	});
-}
-
-#[derive(Clone, Copy)]
-struct Flags {
-	yes_cargo: bool,
-	yes_dioxus: bool,
-	yes_all: bool,
-	orphans: bool,
-	verbose: bool,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -241,6 +265,15 @@ fn discover(start: &Path) -> Discovery {
 	let mut candidates = Vec::new();
 	let mut build_dirs = Vec::new();
 
+	// walkdir can't report a total up front (it discovers dirs as it goes), so the
+	// walk gets a spinner with live counts rather than a percentage bar.
+	let spinner = ProgressBar::new_spinner();
+	spinner.set_style(
+		ProgressStyle::with_template("{spinner:.green} {msg}").unwrap(),
+	);
+	spinner.enable_steady_tick(Duration::from_millis(100));
+	let mut scanned = 0u64;
+
 	let mut it = WalkDir::new(start).into_iter();
 	while let Some(next) = it.next() {
 		let Ok(entry) = next else { continue };
@@ -248,6 +281,15 @@ fn discover(start: &Path) -> Discovery {
 			continue;
 		}
 		let path = entry.path();
+
+		scanned += 1;
+		if scanned.is_multiple_of(128) {
+			spinner.set_message(format!(
+				"Scanning… {scanned} dirs, {} project(s), {} build dir(s)",
+				candidates.len(),
+				build_dirs.len(),
+			));
+		}
 
 		if is_pruned(&entry) {
 			it.skip_current_dir();
@@ -273,6 +315,13 @@ fn discover(start: &Path) -> Discovery {
 		}
 	}
 
+	spinner.finish_and_clear();
+	println!(
+		"Scanned {scanned} directories: found {} project(s) and {} build dir(s).",
+		candidates.len(),
+		build_dirs.len(),
+	);
+
 	Discovery {
 		candidates,
 		build_dirs,
@@ -283,67 +332,117 @@ fn discover(start: &Path) -> Discovery {
 /// metadata` for each project's authoritative workspace root and build
 /// directory. Members of an already-resolved workspace are folded into it rather
 /// than queried again.
+///
+/// The `cargo metadata` calls dominate the runtime, so they run in parallel. The
+/// "skip detached children" optimization needs workspace roots resolved before
+/// their non-member children can be judged, so we do it in two parallel batches:
+/// first every workspace root (identified by a cheap `[workspace]` line-scan,
+/// no cargo spawn), then the remaining standalone crates once coverage is known.
 fn build_plan(candidates: &[Candidate]) -> (Vec<Workspace>, Vec<(PathBuf, String)>) {
-	// Shallow directories first: a workspace root is always shallower than its
-	// members, so we resolve the root (and learn its members) before we would ever
-	// reach a member on its own.
-	let mut order: Vec<&Candidate> = candidates.iter().collect();
-	order.sort_by_key(|c| c.dir.components().count());
+	// The slow phase: one `cargo metadata` per uncovered project. We know the total
+	// up front, so this gets a real progress bar with an ETA.
+	let progress = ProgressBar::new(candidates.len() as u64);
+	progress.set_style(
+		ProgressStyle::with_template(
+			"{spinner:.green} Resolving projects [{bar:30.cyan/blue}] {pos}/{len} ({eta})",
+		)
+		.unwrap()
+		.progress_chars("=>-"),
+	);
+	progress.enable_steady_tick(Duration::from_millis(120));
+
+	// Batch 1: resolve every workspace root in parallel.
+	let (roots, non_roots): (Vec<&Candidate>, Vec<&Candidate>) = candidates
+		.iter()
+		.partition(|c| manifest_is_workspace_root(&c.dir));
+	let root_results = resolve_in_parallel(&roots, &progress);
 
 	let mut workspaces: Vec<Workspace> = Vec::new();
 	let mut failed: Vec<(PathBuf, String)> = Vec::new();
 	let mut covered: HashSet<PathBuf> = HashSet::new();
-	// Directories of workspaces we've already handled (resolved or broken). Their
+	// Directories of workspaces we've handled (resolved or broken). Their
 	// non-member descendants are crates cargo rejects as detached; we skip them.
 	let mut handled_roots: Vec<PathBuf> = Vec::new();
 
-	for candidate in order {
-		if covered.contains(&candidate.dir) {
-			continue;
-		}
-
-		// A crate sitting inside an already-handled workspace but not among its
-		// members is one cargo refuses to resolve standalone ("believes it's in a
-		// workspace when it's not"). Skip the doomed `cargo metadata` call — its
-		// build dirs are still found and cleaned by the CACHEDIR.TAG scan. (Unless
-		// it declares its own `[workspace]`, i.e. it's an independent nested one.)
-		let detached = handled_roots
-			.iter()
-			.any(|root| candidate.dir.starts_with(root) && candidate.dir != *root);
-		if detached && !manifest_is_workspace_root(&candidate.dir) {
-			covered.insert(candidate.dir.clone());
-			continue;
-		}
-
-		match resolve_workspace(&candidate.dir) {
+	for (candidate, result) in root_results {
+		match result {
 			Ok((root, target_dir, member_dirs)) => {
 				handled_roots.push(canonical_or(&root));
+				covered.extend(member_dirs.iter().cloned());
 				workspaces.push(Workspace {
 					root,
 					target_dir,
 					kind: workspace_kind(candidate.kind, &member_dirs),
 				});
-				covered.extend(member_dirs);
 			}
+			// A broken workspace root; record it and skip its members below.
 			Err(e) => {
-				// Expected for detached/broken/incomplete manifests. We don't fabricate
-				// a build dir here: the CACHEDIR.TAG scan handles any real one, whereas a
-				// fake resolved target would mask it from the scan and trigger a doomed
-				// `cargo clean`.
-				failed.push((candidate.dir.clone(), e.to_string()));
-				if manifest_is_workspace_root(&candidate.dir) {
-					// A broken workspace root; don't re-query each of its members.
-					handled_roots.push(candidate.dir.clone());
-				}
+				handled_roots.push(candidate.dir.clone());
+				failed.push((candidate.dir.clone(), e));
 			}
 		}
-
-		// Account for the triggering directory itself (a virtual workspace root is
-		// not a package, so it won't appear among the members).
 		covered.insert(candidate.dir.clone());
 	}
 
+	// Batch 2: the remaining crates that aren't members of, or detached children
+	// of, a workspace we already handled. A crate inside a handled workspace but
+	// not among its members is one cargo refuses to resolve ("believes it's in a
+	// workspace when it's not"); its build dirs are still caught by the scan, so we
+	// don't waste a `cargo metadata` call on it.
+	let mut skipped = 0u64;
+	let standalone: Vec<&Candidate> = non_roots
+		.into_iter()
+		.filter(|c| {
+			let keep = !covered.contains(&c.dir)
+				&& !handled_roots
+					.iter()
+					.any(|root| c.dir.starts_with(root) && c.dir != *root);
+			if !keep {
+				skipped += 1;
+			}
+			keep
+		})
+		.collect();
+	progress.inc(skipped);
+
+	for (candidate, result) in resolve_in_parallel(&standalone, &progress) {
+		match result {
+			// We don't fabricate a build dir on failure: the CACHEDIR.TAG scan handles
+			// any real one, whereas a fake resolved target would mask it from the scan.
+			Ok((root, target_dir, member_dirs)) => workspaces.push(Workspace {
+				root,
+				target_dir,
+				kind: workspace_kind(candidate.kind, &member_dirs),
+			}),
+			Err(e) => failed.push((candidate.dir.clone(), e)),
+		}
+	}
+
+	progress.finish_and_clear();
+
+	// Dedupe workspaces that share a resolved root (e.g. members of a workspace
+	// whose root lives above the search path, each resolved on its own).
+	let mut seen_roots = HashSet::new();
+	workspaces.retain(|ws| seen_roots.insert(canonical_or(&ws.root)));
+
 	(workspaces, failed)
+}
+
+/// Runs `cargo metadata` for each candidate in parallel, advancing `progress`
+/// as results land. Errors are stringified for later reporting.
+#[allow(clippy::type_complexity)]
+fn resolve_in_parallel<'a>(
+	candidates: &[&'a Candidate],
+	progress: &ProgressBar,
+) -> Vec<(&'a Candidate, Result<(PathBuf, PathBuf, Vec<PathBuf>), String>)> {
+	candidates
+		.par_iter()
+		.map(|candidate| {
+			let result = resolve_workspace(&candidate.dir).map_err(|e| e.to_string());
+			progress.inc(1);
+			(*candidate, result)
+		})
+		.collect()
 }
 
 /// Runs `cargo metadata` for a manifest and returns `(workspace_root,
