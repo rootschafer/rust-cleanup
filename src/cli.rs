@@ -1,13 +1,14 @@
 use std::path::PathBuf;
 
-use clap::parser::ValueSource;
-use clap::{ArgMatches, Args, CommandFactory, FromArgMatches, Parser};
+use clap::{ArgMatches, Args, CommandFactory, FromArgMatches, Parser, parser::ValueSource};
 
-use crate::clean;
-use crate::config::{self, Config};
-use crate::discover::{WalkOptions, default_ignore_names, discover};
-use crate::plan::build_plan;
-use crate::util::{expand_tilde, parse_size};
+use crate::{
+	clean,
+	config::{self, Config},
+	discover::{WalkOptions, default_ignore_names, discover},
+	plan::build_plan,
+	util::{expand_tilde, parse_size},
+};
 
 /// Frees disk space by cleaning the build artifacts of Rust projects under a
 /// directory. Already-clean projects are skipped, workspaces are cleaned once,
@@ -191,7 +192,11 @@ fn from_cli(matches: &ArgMatches, id: &str) -> bool {
 /// A bool flag's effective value: the command line if it was passed there,
 /// otherwise the config, otherwise clap's default.
 fn merge_bool(matches: &ArgMatches, id: &str, cli: bool, cfg: Option<bool>) -> bool {
-	if from_cli(matches, id) { cli } else { cfg.unwrap_or(cli) }
+	if from_cli(matches, id) {
+		cli
+	} else {
+		cfg.unwrap_or(cli)
+	}
 }
 
 /// Parses the config's `keep_size` string. A bad value warns and is treated as
@@ -232,23 +237,11 @@ mod tests {
 	/// silently break — so assert the ids exist and resolve.
 	#[test]
 	fn flag_ids_are_the_field_names() {
-		let matches = Cli::command()
-			.get_matches_from(["rust-cleanup", "--orphans", "--show-size"]);
+		let matches = Cli::command().get_matches_from(["rust-cleanup", "--orphans", "--show-size"]);
 
 		for id in [
-			"path",
-			"follow_symlinks",
-			"max_depth",
-			"ignore",
-			"yes_cargo",
-			"yes_dioxus",
-			"yes_all",
-			"orphans",
-			"dry_run",
-			"verbose",
-			"show_size",
-			"keep_days",
-			"keep_size",
+			"path", "follow_symlinks", "max_depth", "ignore", "yes_cargo", "yes_dioxus", "yes_all", "orphans",
+			"dry_run", "verbose", "show_size", "keep_days", "keep_size",
 		] {
 			assert!(
 				matches.try_get_one::<bool>(id).is_ok() || matches.ids().any(|i| i.as_str() == id),

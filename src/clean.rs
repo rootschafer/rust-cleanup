@@ -7,20 +7,17 @@ use std::{
 	time::{Duration, SystemTime},
 };
 
-use crate::cli::Flags;
-use crate::discover::{Discovery, containing_project};
-use crate::plan::Workspace;
-use crate::util::canonical_or;
+use crate::{
+	cli::Flags,
+	discover::{Discovery, containing_project},
+	plan::Workspace,
+	util::canonical_or,
+};
 
 /// Executes the plan: clean each project's resolved build dir, then remove any
 /// stray/orphaned build dir the scan turned up, then print a summary. Honors
 /// `--dry-run` by reporting instead of deleting.
-pub(crate) fn run(
-	flags: Flags,
-	discovery: &Discovery,
-	workspaces: &[Workspace],
-	failed: &[(PathBuf, String)],
-) {
+pub(crate) fn run(flags: Flags, discovery: &Discovery, workspaces: &[Workspace], failed: &[(PathBuf, String)]) {
 	if flags.dry_run {
 		println!("Dry run — nothing will be deleted.");
 	}
@@ -132,10 +129,7 @@ pub(crate) fn run(
 				}
 				let size = measured.map_or(0, |(bytes, _)| bytes);
 				if flags.dry_run {
-					println!(
-						"Would remove orphaned build dir {}",
-						with_size(build_dir, measured, flags),
-					);
+					println!("Would remove orphaned build dir {}", with_size(build_dir, measured, flags),);
 					freed += size;
 					continue;
 				}
@@ -327,10 +321,7 @@ fn print_summary(summary: &Summary) {
 		println!("{} project(s) were already clean.", summary.already_clean);
 	}
 	if summary.kept_by_filter > 0 {
-		println!(
-			"{} build dir(s) kept by --keep-days/--keep-size.",
-			summary.kept_by_filter,
-		);
+		println!("{} build dir(s) kept by --keep-days/--keep-size.", summary.kept_by_filter,);
 	}
 	if !summary.failed.is_empty() {
 		println!(

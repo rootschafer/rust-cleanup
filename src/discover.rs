@@ -2,16 +2,17 @@ use std::{
 	collections::HashSet,
 	fs,
 	path::{Path, PathBuf},
-	sync::Mutex,
-	sync::atomic::{AtomicUsize, Ordering},
+	sync::{
+		Mutex,
+		atomic::{AtomicUsize, Ordering},
+	},
 	time::Duration,
 };
 
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
-use crate::cli::Flags;
-use crate::util::canonical_or;
+use crate::{cli::Flags, util::canonical_or};
 
 /// The cache-directory tag cargo drops into every build directory. Its body
 /// contains the word "cargo" (`... created by cargo.`), which lets us tell a
@@ -99,10 +100,7 @@ pub(crate) fn discover(start: &Path, options: WalkOptions) -> Discovery {
 		visited: options.follow_symlinks.then(|| Mutex::new(HashSet::new())),
 		scanned: AtomicUsize::new(0),
 	};
-	let WalkResult {
-		candidates,
-		build_dirs,
-	} = walk(start, 0, &ctx);
+	let WalkResult { candidates, build_dirs } = walk(start, 0, &ctx);
 
 	spinner.finish_and_clear();
 	println!(
@@ -112,10 +110,7 @@ pub(crate) fn discover(start: &Path, options: WalkOptions) -> Discovery {
 		build_dirs.len(),
 	);
 
-	Discovery {
-		candidates,
-		build_dirs,
-	}
+	Discovery { candidates, build_dirs }
 }
 
 struct WalkCtx {
@@ -137,7 +132,9 @@ impl WalkCtx {
 			return false;
 		}
 		let canon = canonical_or(dir);
-		self.ignore_paths.iter().any(|ignored| canon.starts_with(ignored))
+		self.ignore_paths
+			.iter()
+			.any(|ignored| canon.starts_with(ignored))
 	}
 }
 
@@ -192,8 +189,7 @@ fn walk(dir: &Path, depth: usize, ctx: &WalkCtx) -> WalkResult {
 
 		// `file_type` is not symlink-followed. A symlinked directory only counts as
 		// a directory to recurse into when --follow-symlinks is set.
-		let is_dir = file_type.is_dir()
-			|| (ctx.follow_symlinks && file_type.is_symlink() && entry.path().is_dir());
+		let is_dir = file_type.is_dir() || (ctx.follow_symlinks && file_type.is_symlink() && entry.path().is_dir());
 
 		if is_dir {
 			let pruned_by_name = name.is_some_and(|n| ctx.ignore_names.contains(n));
@@ -253,10 +249,7 @@ fn is_cargo_build_dir(dir: &Path) -> bool {
 }
 
 /// The deepest project directory that contains `build_dir`, if any.
-pub(crate) fn containing_project<'a>(
-	build_dir: &Path,
-	candidates: &'a [Candidate],
-) -> Option<&'a Candidate> {
+pub(crate) fn containing_project<'a>(build_dir: &Path, candidates: &'a [Candidate]) -> Option<&'a Candidate> {
 	candidates
 		.iter()
 		.filter(|c| build_dir.starts_with(&c.dir) && build_dir != c.dir.as_path())

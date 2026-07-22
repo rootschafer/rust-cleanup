@@ -4,10 +4,12 @@
 //! `CACHEDIR.TAG`) so we don't need to actually compile anything — `cargo clean`
 //! still removes a project's real target dir, and the scan removes strays.
 
-use std::fs;
-use std::io::Write;
-use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::{
+	fs,
+	io::Write,
+	path::Path,
+	process::{Command, Output, Stdio},
+};
 
 use tempfile::TempDir;
 
@@ -223,10 +225,7 @@ fn detached_child_is_skipped_quietly_but_its_build_dir_is_removed() {
 	let o = run(t.path(), &["--yes-all", "-v"]);
 	let out = stdout(&o);
 
-	assert!(
-		!ws.join("detached/target").exists(),
-		"detached build dir removed by scan"
-	);
+	assert!(!ws.join("detached/target").exists(), "detached build dir removed by scan");
 	assert!(
 		!out.contains("couldn't be read"),
 		"detached child must not be reported as a metadata failure:\n{out}"
@@ -465,10 +464,7 @@ fn max_depth_zero_scans_only_the_root() {
 
 	run(t.path(), &["--max-depth", "0", "--yes-all"]);
 
-	assert!(
-		t.path().join("proj/target").exists(),
-		"--max-depth 0 should not descend at all"
-	);
+	assert!(t.path().join("proj/target").exists(), "--max-depth 0 should not descend at all");
 }
 
 // --- weird workspace & build-dir setups -----------------------------------
@@ -591,8 +587,7 @@ use std::time::{Duration, SystemTime};
 
 /// Set the mtime of every file under `dir` to `days` days ago.
 fn age_build_dir(dir: &Path, days: u64) {
-	let when =
-		filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(days * 86_400));
+	let when = filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(days * 86_400));
 	fn recurse(dir: &Path, when: filetime::FileTime) {
 		for entry in fs::read_dir(dir).unwrap().flatten() {
 			let p = entry.path();
@@ -738,10 +733,7 @@ fn config_ignore_paths_protects_a_subtree() {
 	make_crate(&normal, "normal");
 	make_build_dir(&normal.join("target"));
 
-	let cfg = format!(
-		"yes_all = true\nignore_paths = [\"{}\"]\n",
-		t.path().join("skip").display()
-	);
+	let cfg = format!("yes_all = true\nignore_paths = [\"{}\"]\n", t.path().join("skip").display());
 	run_with_config(t.path(), &cfg, &[]);
 
 	assert!(skipped.join("target").exists(), "an ignored tree is never scanned");

@@ -8,8 +8,10 @@ use cargo_metadata::MetadataCommand;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
-use crate::discover::{Candidate, ProjectType};
-use crate::util::canonical_or;
+use crate::{
+	discover::{Candidate, ProjectType},
+	util::canonical_or,
+};
 
 /// A distinct thing to clean: one standalone crate or one workspace, together
 /// with the build directory cargo resolved for it.
@@ -34,11 +36,9 @@ pub(crate) fn build_plan(candidates: &[Candidate]) -> (Vec<Workspace>, Vec<(Path
 	// up front, so this gets a real progress bar with an ETA.
 	let progress = ProgressBar::new(candidates.len() as u64);
 	progress.set_style(
-		ProgressStyle::with_template(
-			"{spinner:.green} Resolving projects [{bar:30.cyan/blue}] {pos}/{len} ({eta})",
-		)
-		.unwrap()
-		.progress_chars("=>-"),
+		ProgressStyle::with_template("{spinner:.green} Resolving projects [{bar:30.cyan/blue}] {pos}/{len} ({eta})")
+			.unwrap()
+			.progress_chars("=>-"),
 	);
 	progress.enable_steady_tick(Duration::from_millis(120));
 
@@ -180,8 +180,7 @@ fn manifest_is_workspace_root(dir: &Path) -> bool {
 /// A workspace counts as Dioxus if the triggering crate or any member carries a
 /// `Dioxus.toml`, so `--yes-dioxus` applies to it.
 fn workspace_kind(trigger_kind: ProjectType, member_dirs: &[PathBuf]) -> ProjectType {
-	let has_dioxus = trigger_kind == ProjectType::Dioxus
-		|| member_dirs.iter().any(|d| d.join("Dioxus.toml").exists());
+	let has_dioxus = trigger_kind == ProjectType::Dioxus || member_dirs.iter().any(|d| d.join("Dioxus.toml").exists());
 	if has_dioxus {
 		ProjectType::Dioxus
 	} else {
