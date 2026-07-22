@@ -557,3 +557,94 @@ fn a_crate_inside_a_build_dir_is_ignored() {
 		"we must not descend into a build dir, so anything inside it is untouched"
 	);
 }
+
+// --- --keep-days / --keep-size filters (correct polarity) -----------------
+
+use std::time::{Duration, SystemTime};
+
+/// Set the mtime of every file under `dir` to `days` days ago.
+fn age_build_dir(dir: &Path, days: u64) {
+	let when =
+		filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(days * 86_400));
+	fn recurse(dir: &Path, when: filetime::FileTime) {
+		for entry in fs::read_dir(dir).unwrap().flatten() {
+			let p = entry.path();
+			if entry.file_type().unwrap().is_dir() {
+				recurse(&p, when);
+			} else {
+				filetime::set_file_mtime(&p, when).unwrap();
+			}
+		}
+	}
+	recurse(dir, when);
+}
+
+#[test]
+fn keep_days_protects_recent_projects_and_cleans_stale_ones() {
+	let t = tmp();
+	make_crate(&t.path().join("fresh"), "fresh");
+	make_build_dir(&t.path().join("fresh/target")); // mtime ≈ now
+	make_crate(&t.path().join("stale"), "stale");
+	make_build_dir(&t.path().join("stale/target"));
+	age_build_dir(&t.path().join("stale/target"), 40); // untouched for 40 days
+
+	run(t.path(), &["--keep-days", "30", "--yes-all"]);
+
+	assert!(
+		t.path().join("fresh/target").exists(),
+		"recently-built project must be PROTECTED (not cleaned)"
+	);
+	assert!(
+		!t.path().join("stale/target").exists(),
+		"a project untouched for >30 days should be cleaned"
+	);
+}
+
+#[test]
+fn keep_size_cleans_large_targets_and_keeps_small_ones() {
+	let t = tmp();
+	// Big: >1 MiB of artifacts.
+	make_crate(&t.path().join("big"), "big");
+	make_build_dir(&t.path().join("big/target"));
+	write(&t.path().join("big/target/debug/blob"), &"x".repeat(2 * 1024 * 1024));
+	// Small: a few bytes.
+	make_crate(&t.path().join("small"), "small");
+	make_build_dir(&t.path().join("small/target"));
+
+	run(t.path(), &["--keep-size", "1MiB", "--yes-all"]);
+
+	assert!(
+		!t.path().join("big/target").exists(),
+		"a target at/above the size threshold should be cleaned"
+	);
+	assert!(
+		t.path().join("small/target").exists(),
+		"a target below the size threshold must be KEPT"
+	);
+}
+
+#[test]
+fn filters_do_not_affect_a_normal_run() {
+	let t = tmp();
+	make_crate(&t.path().join("a"), "a");
+	make_build_dir(&t.path().join("a/target"));
+
+	run(t.path(), &["--yes-all"]); // no filters → unchanged behavior
+
+	assert!(!t.path().join("a/target").exists());
+}
+
+#[test]
+fn show_size_reports_per_dir_size_and_a_freed_total() {
+	let t = tmp();
+	make_crate(&t.path().join("a"), "a");
+	make_build_dir(&t.path().join("a/target"));
+	write(&t.path().join("a/target/debug/blob"), &"x".repeat(2 * 1024 * 1024)); // 2 MiB
+
+	let o = run(t.path(), &["--show-size", "--dry-run"]);
+	let out = stdout(&o);
+
+	assert!(out.contains("MiB"), "per-dir size should be shown:\n{out}");
+	assert!(out.contains("Would free"), "a freed total should be shown:\n{out}");
+	assert!(t.path().join("a/target").exists(), "dry run deletes nothing");
+}

@@ -4,6 +4,7 @@ use std::{
 	io::{self, Write},
 	path::{Path, PathBuf},
 	process::Command as Process,
+	time::{Duration, SystemTime},
 };
 
 use crate::cli::Flags;
@@ -26,6 +27,8 @@ pub(crate) fn run(
 
 	let mut skipped: Vec<PathBuf> = Vec::new();
 	let mut already_clean = 0usize;
+	let mut kept_by_filter = 0usize;
+	let mut freed = 0u64; // estimated bytes cleaned (only meaningful with --show-size)
 
 	// Pass 1: clean each distinct workspace/standalone project once, using the
 	// build directory cargo itself resolved (so relocated build dirs are handled).
@@ -39,14 +42,21 @@ pub(crate) fn run(
 		if !cleaned.insert(canonical_or(&ws.target_dir)) {
 			continue; // this build dir was already cleaned via another project
 		}
+		let measured = measure_if_needed(&ws.target_dir, flags);
+		if !filters_allow(measured, flags) {
+			kept_by_filter += 1;
+			continue;
+		}
+		let size = measured.map_or(0, |(bytes, _)| bytes);
 
 		if flags.dry_run {
 			println!(
 				"Would clean {} ({} project) — build dir {}",
 				ws.root.display(),
 				ws.kind.display_name(),
-				ws.target_dir.display(),
+				with_size(&ws.target_dir, measured, flags),
 			);
+			freed += size;
 			continue;
 		}
 
@@ -54,10 +64,11 @@ pub(crate) fn run(
 			"{} is a {} project (build dir: {}). Clean it?",
 			ws.root.display(),
 			ws.kind.display_name(),
-			ws.target_dir.display(),
+			with_size(&ws.target_dir, measured, flags),
 		);
 		if ws.kind.should_autoclean(flags) || prompt(&question) {
 			cargo_clean(&ws.root);
+			freed += size;
 		} else {
 			skipped.push(ws.root.clone());
 		}
@@ -81,21 +92,29 @@ pub(crate) fn run(
 		match containing_project(build_dir, &discovery.candidates) {
 			// Leftover sitting inside a known project: confidently that project's.
 			Some(project) => {
+				let measured = measure_if_needed(build_dir, flags);
+				if !filters_allow(measured, flags) {
+					kept_by_filter += 1;
+					continue;
+				}
+				let size = measured.map_or(0, |(bytes, _)| bytes);
 				if flags.dry_run {
 					println!(
 						"Would remove stray build dir {} (inside {})",
-						build_dir.display(),
+						with_size(build_dir, measured, flags),
 						project.dir.display(),
 					);
+					freed += size;
 					continue;
 				}
 				let question = format!(
 					"{} is a stray Cargo build dir (not {}'s current build dir). Remove it?",
-					build_dir.display(),
+					with_size(build_dir, measured, flags),
 					project.dir.display(),
 				);
 				if project.kind.should_autoclean(flags) || prompt(&question) {
 					remove_dir(build_dir);
+					freed += size;
 				} else {
 					skipped.push(build_dir.clone());
 				}
@@ -106,16 +125,27 @@ pub(crate) fn run(
 					detached_found += 1;
 					continue;
 				}
+				let measured = measure_if_needed(build_dir, flags);
+				if !filters_allow(measured, flags) {
+					kept_by_filter += 1;
+					continue;
+				}
+				let size = measured.map_or(0, |(bytes, _)| bytes);
 				if flags.dry_run {
-					println!("Would remove orphaned build dir {}", build_dir.display());
+					println!(
+						"Would remove orphaned build dir {}",
+						with_size(build_dir, measured, flags),
+					);
+					freed += size;
 					continue;
 				}
 				let question = format!(
 					"{} is an orphaned Cargo build dir with no associated project. Remove it?",
-					build_dir.display(),
+					with_size(build_dir, measured, flags),
 				);
 				if flags.yes_all || prompt(&question) {
 					remove_dir(build_dir);
+					freed += size;
 				} else {
 					skipped.push(build_dir.clone());
 				}
@@ -123,14 +153,123 @@ pub(crate) fn run(
 		}
 	}
 
+	if flags.show_size {
+		let verb = if flags.dry_run { "Would free" } else { "Freed" };
+		println!("{verb} ~{}.", human_size(freed));
+	}
+
 	print_summary(&Summary {
 		already_clean,
+		kept_by_filter,
 		detached_found,
 		orphans_enabled: flags.orphans,
 		skipped: &skipped,
 		failed,
 		verbose: flags.verbose,
 	});
+}
+
+/// Measures a build dir only when a filter or `--show-size` needs it; otherwise
+/// returns `None` so a normal run pays nothing.
+fn measure_if_needed(build_dir: &Path, flags: Flags) -> Option<(u64, SystemTime)> {
+	if flags.keep_days.is_some() || flags.keep_size.is_some() || flags.show_size {
+		measure(build_dir)
+	} else {
+		None
+	}
+}
+
+/// Renders a build-dir path, appending its human size in parentheses when
+/// `--show-size` is on and the size is known.
+fn with_size(path: &Path, measured: Option<(u64, SystemTime)>, flags: Flags) -> String {
+	match (flags.show_size, measured) {
+		(true, Some((bytes, _))) => format!("{} ({})", path.display(), human_size(bytes)),
+		_ => path.display().to_string(),
+	}
+}
+
+/// Formats a byte count as a 1024-based human string (e.g. `1.5 GiB`).
+fn human_size(bytes: u64) -> String {
+	const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+	let mut value = bytes as f64;
+	let mut unit = 0;
+	while value >= 1024.0 && unit < UNITS.len() - 1 {
+		value /= 1024.0;
+		unit += 1;
+	}
+	if unit == 0 {
+		format!("{bytes} B")
+	} else {
+		format!("{value:.1} {}", UNITS[unit])
+	}
+}
+
+/// Whether a build dir survives the `--keep-days` / `--keep-size` filters and may
+/// therefore be cleaned, given its (optional) measurement. Returns `true`
+/// immediately when no filter is set. Note the polarity: we *keep* (return
+/// `false` for) recently-touched or small build dirs, and only clean stale/large
+/// ones. A filter with no measurement (couldn't read it) keeps it, so we never
+/// delete something we failed to inspect.
+fn filters_allow(measured: Option<(u64, SystemTime)>, flags: Flags) -> bool {
+	if flags.keep_days.is_none() && flags.keep_size.is_none() {
+		return true;
+	}
+	let Some((size, newest)) = measured else {
+		return false;
+	};
+	if let Some(days) = flags.keep_days
+		&& touched_within(newest, days)
+	{
+		return false; // recently built — protect active work
+	}
+	if let Some(min_size) = flags.keep_size
+		&& size < min_size
+	{
+		return false; // too small to be worth reclaiming
+	}
+	true
+}
+
+/// Total size in bytes and newest file mtime under `dir`. Walks the whole tree
+/// (the inherent cost of size/age filtering); does not follow symlinks.
+fn measure(dir: &Path) -> Option<(u64, SystemTime)> {
+	let mut total = 0u64;
+	let mut newest = SystemTime::UNIX_EPOCH;
+	let mut stack = vec![dir.to_path_buf()];
+
+	while let Some(current) = stack.pop() {
+		let Ok(entries) = fs::read_dir(&current) else {
+			continue;
+		};
+		for entry in entries.flatten() {
+			let Ok(file_type) = entry.file_type() else {
+				continue;
+			};
+			if file_type.is_dir() {
+				stack.push(entry.path());
+			} else if file_type.is_file()
+				&& let Ok(meta) = entry.metadata()
+			{
+				total += meta.len();
+				if let Ok(modified) = meta.modified()
+					&& modified > newest
+				{
+					newest = modified;
+				}
+			}
+		}
+	}
+
+	Some((total, newest))
+}
+
+/// Whether `mtime` is within the last `days` days (clock skew into the future is
+/// treated as "recent").
+fn touched_within(mtime: SystemTime, days: u64) -> bool {
+	match SystemTime::now().duration_since(mtime) {
+		Ok(elapsed) => elapsed < Duration::from_secs(days.saturating_mul(86_400)),
+		Err(_) => true,
+	}
 }
 
 fn remove_dir(dir: &Path) {
@@ -175,6 +314,7 @@ fn prompt(question: &str) -> bool {
 
 struct Summary<'a> {
 	already_clean: usize,
+	kept_by_filter: usize,
 	detached_found: usize,
 	orphans_enabled: bool,
 	skipped: &'a [PathBuf],
@@ -185,6 +325,12 @@ struct Summary<'a> {
 fn print_summary(summary: &Summary) {
 	if summary.already_clean > 0 {
 		println!("{} project(s) were already clean.", summary.already_clean);
+	}
+	if summary.kept_by_filter > 0 {
+		println!(
+			"{} build dir(s) kept by --keep-days/--keep-size.",
+			summary.kept_by_filter,
+		);
 	}
 	if !summary.failed.is_empty() {
 		println!(

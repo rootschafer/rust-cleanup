@@ -57,6 +57,53 @@ pub struct Flags {
 	/// List the projects that `cargo metadata` could not read
 	#[arg(short, long)]
 	pub verbose: bool,
+
+	/// Show each build dir's size before you decide (and a freed-space total).
+	/// Measuring walks every target, so this is slower than a normal run.
+	#[arg(short = 's', long)]
+	pub show_size: bool,
+
+	/// Keep (don't clean) build dirs touched within the last N days; only clean
+	/// ones untouched for longer. Protects projects you're actively building.
+	#[arg(long, value_name = "DAYS")]
+	pub keep_days: Option<u64>,
+
+	/// Only clean build dirs at least this large; keep smaller ones. Accepts
+	/// units, e.g. 500MB, 1GiB (1024-based). Measuring sizes walks each target,
+	/// so this is slower than a normal run.
+	#[arg(long, value_name = "SIZE", value_parser = parse_size)]
+	pub keep_size: Option<u64>,
+}
+
+/// Parses a human size like `500MB`, `2G`, `1GiB`, or a raw byte count. Units are
+/// 1024-based; a trailing `b`/`ib` is optional (`GB`, `GiB`, and `G` are equal).
+fn parse_size(s: &str) -> Result<u64, String> {
+	let lower = s.trim().to_ascii_lowercase();
+	let core = lower
+		.strip_suffix("ib")
+		.or_else(|| lower.strip_suffix('b'))
+		.unwrap_or(&lower);
+	let (digits, mult): (&str, u64) = match core.strip_suffix('k') {
+		Some(d) => (d, 1 << 10),
+		None => match core.strip_suffix('m') {
+			Some(d) => (d, 1 << 20),
+			None => match core.strip_suffix('g') {
+				Some(d) => (d, 1 << 30),
+				None => match core.strip_suffix('t') {
+					Some(d) => (d, 1 << 40),
+					None => (core, 1),
+				},
+			},
+		},
+	};
+	let value: f64 = digits
+		.trim()
+		.parse()
+		.map_err(|_| format!("invalid size '{s}' (try e.g. 500MB, 1GiB)"))?;
+	if value < 0.0 {
+		return Err(format!("size can't be negative: '{s}'"));
+	}
+	Ok((value * mult as f64) as u64)
 }
 
 pub fn run_cli() {
@@ -90,4 +137,24 @@ fn configure_thread_pool() {
 	let _ = rayon::ThreadPoolBuilder::new()
 		.num_threads(threads)
 		.build_global();
+}
+
+#[cfg(test)]
+mod tests {
+	use super::parse_size;
+
+	#[test]
+	fn parses_human_sizes() {
+		assert_eq!(parse_size("1024").unwrap(), 1024);
+		assert_eq!(parse_size("1k").unwrap(), 1024);
+		assert_eq!(parse_size("1KB").unwrap(), 1024);
+		assert_eq!(parse_size("1KiB").unwrap(), 1024);
+		assert_eq!(parse_size("2M").unwrap(), 2 << 20);
+		assert_eq!(parse_size("1GB").unwrap(), 1 << 30);
+		assert_eq!(parse_size("1gib").unwrap(), 1 << 30);
+		assert_eq!(parse_size(" 3 g ").unwrap(), 3u64 << 30);
+		assert_eq!(parse_size("1.5G").unwrap(), (1.5 * (1u64 << 30) as f64) as u64);
+		assert!(parse_size("abc").is_err());
+		assert!(parse_size("-5M").is_err());
+	}
 }
