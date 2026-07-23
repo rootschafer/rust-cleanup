@@ -4,8 +4,8 @@ version = "0.1.4"
 edition = "2024"
 description = "Frees disk space by cleaning the build artifacts of every Rust project under a directory, including the stray build dirs `cargo clean` can't reach."
 repository = "https://github.com/rootschafer/rustsweep"
-homepage = "https://github.com/rootschafer/rustsweep"
-# Matches LICENSE.txt (MIT only).
+homepage = "https://rootschafer.github.io/rustsweep/"
+# Matches the LICENSE file (MIT only).
 license = "MIT"
 readme = "README.md"
 keywords = ["cargo", "clean", "disk-space", "target", "cli"]
