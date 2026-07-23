@@ -1,0 +1,65 @@
+# Builds the mdBook site under docs/ and publishes it to GitHub Pages.
+#
+# Kept separate from ci.yml on purpose: a docs deploy should never slow down or
+# block a test run, and the two have nothing to say to each other. Pull requests
+# build the book but do not deploy, so a broken SUMMARY or a dangling
+# `{{#include}}` fails in review rather than on main.
+#
+# One-time repo setting this depends on: Settings → Pages → Source: "GitHub
+# Actions". Without it the deploy step fails with a 404.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel a run that is already publishing; queue behind it instead.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  # Pinned so the published site can't change because upstream released. Bump
+  # deliberately, and rebuild locally with the same version first.
+  MDBOOK_VERSION: 0.5.4
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - run: mdbook build docs
+
+      - uses: actions/configure-pages@v5
+        if: github.event_name != 'pull_request'
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
+        with:
+          path: docs/book
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

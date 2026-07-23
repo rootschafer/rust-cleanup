@@ -8,18 +8,32 @@ clean` can't reach — renamed `target/`s, dirs left behind by
 at all. Already-clean projects are skipped. Nothing is deleted without a `y`
 unless you pass `--yes`.
 
+**📖 [Documentation](https://rootschafer.github.io/rustsweep/)** — installation,
+a walkthrough of the first run, the config file, ignore patterns, and
+[how it decides what to delete](https://rootschafer.github.io/rustsweep/how-it-decides.html).
+
 # Install
 
-From source:
+No Rust toolchain needed — the installer fetches a prebuilt binary:
 
 ```sh
-git clone https://github.com/rootschafer/rustsweep
-cd rustsweep
-cargo install --path .
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/rootschafer/rustsweep/releases/latest/download/rustsweep-installer.sh | sh
 ```
 
-Once a version is tagged, the release workflow also publishes prebuilt binaries
-and a one-line installer (no Rust toolchain needed) — see [Releasing](#releasing).
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/rootschafer/rustsweep/releases/latest/download/rustsweep-installer.ps1 | iex"
+```
+
+Or from source:
+
+```sh
+cargo install --git https://github.com/rootschafer/rustsweep
+```
+
+Per-platform archives and checksums are on the
+[releases page](https://github.com/rootschafer/rustsweep/releases); see the
+[installation chapter](https://rootschafer.github.io/rustsweep/installation.html)
+for the full set.
 
 # Usage
 
@@ -107,50 +121,55 @@ show_size = true
 ignore = ["vendor", "~/Code/Rust/EMBED/ESP", "**/build-cache"]
 ```
 
-See [`config.example.toml`](config.example.toml) for the annotated full set.
-
 **There is no `yes` key.** Cleaning without a prompt is the one irreversible
 thing this tool does, so `--yes` has to be given per run rather than left armed
-in a file.
+in a file. An unknown key is an error, so a typo can't silently do nothing.
 
-## Ignore patterns
+`ignore` (and the repeatable `--ignore <PATTERN>`, which *adds to* it rather than
+replacing it) takes `.gitignore`-style patterns — a bare name matches a directory
+at any depth, anything else is a glob on the full path. `.git`, `node_modules`,
+and `.jj` are always ignored.
 
-`ignore` (and the repeatable `--ignore <PATTERN>` flag, which *adds to* it rather
-than replacing it) takes `.gitignore`-style patterns:
+Two things worth knowing before you rely on the numbers:
 
-| Pattern | Matches |
-| --- | --- |
-| `vendor` | a directory named `vendor`, at any depth |
-| `**/build-cache` | the same thing, written as an explicit glob |
-| `~/Code/*/scratch` | a glob on the full path — `*` stops at a `/`, `**` spans them |
-| `/opt/toolchains` | that directory and everything under it |
+- `--show-size`, `--keep-days`, and `--keep-size` each measure every build dir,
+  which walks its whole tree. A run without them never pays that.
+- Sizes are *apparent* sizes (the sum of file lengths), so totals differ a little
+  from `du`. A build dir that couldn't be fully read shows its size as a lower
+  bound (`≥`) and is kept rather than judged on incomplete numbers.
 
-A leading `~` is expanded, and `./x` resolves against the current directory.
-Matching a directory prunes the whole subtree, so nothing inside it is ever
-scanned or cleaned. `.git`, `node_modules`, and `.jj` are always ignored;
-patterns add to that floor and can't remove from it.
+Full detail — the annotated
+[`config.example.toml`](config.example.toml), the pattern rules and their cost,
+the filter semantics — is in the book:
+[Configuration](https://rootschafer.github.io/rustsweep/configuration.html),
+[Ignore patterns](https://rootschafer.github.io/rustsweep/ignore-patterns.html),
+[Filters](https://rootschafer.github.io/rustsweep/filters.html).
 
-Bare names cost nothing — they're compared against directory names during the
-walk, exactly like the built-ins. A pattern containing `/` or a glob character is
-matched against each directory's full path, which needs a path resolution per
-directory (on a 60k-directory tree that's roughly a 45% slower scan). Prefer a
-bare name when it says what you mean.
+# Documentation
 
-The search root itself is exempt: pointing `--path` directly at an ignored
-directory scans it anyway — an explicit target on the command line beats the
-ignore list. The patterns still apply to the directories beneath it.
+The book lives in [`docs/`](docs/) and is published to
+<https://rootschafer.github.io/rustsweep/> by `.github/workflows/docs.yml` on
+every push to `main`.
 
-## Notes
+```sh
+mdbook serve docs      # live preview at http://localhost:3000
+mdbook build docs      # one-shot build into docs/book/ (gitignored)
+```
 
-- An unknown key is an error, so a typo can't silently do nothing. A broken
-  config prints a warning naming the file and the problem, then the run
-  continues with the built-in defaults.
-- `--show-size`, `--keep-days`, and `--keep-size` each have to measure every
-  build dir, which walks its whole tree. A run without them never pays that.
-- Sizes are *apparent* sizes (the sum of file lengths), so totals can differ a
-  little from `du`, which counts allocated disk blocks. If part of a build dir
-  can't be read, its size is shown as a lower bound (`≥`), and `--keep-days` /
-  `--keep-size` keep it rather than judging it on incomplete numbers.
+`docs/src/cli-reference.md` is **generated** — see below. Everything else is
+hand-written. `configuration.md` pulls in the real `config.example.toml` with
+`{{#include}}` rather than copying it.
+
+## Generated docs
+
+The usage block above, `docs/src/cli-reference.md`, and `docs/man/rustsweep.1`
+are all rendered from the clap definitions in `src/cli.rs` and checked by
+`tests/docs.rs`. Editing any of them by hand is a test failure. After changing a
+flag, its help text, or the version:
+
+```sh
+UPDATE_DOCS=1 cargo test      # rewrites all three; commit the result
+```
 
 # Releasing
 

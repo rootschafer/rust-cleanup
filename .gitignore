@@ -1,1 +1,3 @@
 /target
+# mdBook build output — the site is rebuilt in CI from docs/src.
+/docs/book
