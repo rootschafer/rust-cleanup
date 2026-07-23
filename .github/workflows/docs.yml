@@ -20,11 +20,6 @@ permissions:
   pages: write
   id-token: write
 
-# Never cancel a run that is already publishing; queue behind it instead.
-concurrency:
-  group: pages
-  cancel-in-progress: false
-
 env:
   # Pinned so the published site can't change because upstream released. Bump
   # deliberately, and rebuild locally with the same version first.
@@ -57,9 +52,15 @@ jobs:
     needs: build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    # Scoped to this job rather than the workflow: pull-request builds don't
+    # publish, so making them queue behind a deploy would serialize reviews for
+    # no reason. Never cancel a run that is already publishing.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

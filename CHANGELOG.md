@@ -102,7 +102,7 @@ The first release with prebuilt binaries and an installer.
 
 [Unreleased]: https://github.com/rootschafer/rustsweep/compare/v0.1.4...HEAD
 [0.1.4]: https://github.com/rootschafer/rustsweep/releases/tag/v0.1.4
-[0.1.3]: https://github.com/rootschafer/rustsweep/compare/f9facf1...ffcaa0c
-[0.1.2]: https://github.com/rootschafer/rustsweep/compare/43105bc...d1691b9
+[0.1.3]: https://github.com/rootschafer/rustsweep/compare/910232c...ffcaa0c
+[0.1.2]: https://github.com/rootschafer/rustsweep/compare/43105bc...910232c
 [0.1.1]: https://github.com/rootschafer/rustsweep/compare/18538db...43105bc
 [0.1.0]: https://github.com/rootschafer/rustsweep/commits/18538db
