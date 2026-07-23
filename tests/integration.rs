@@ -907,3 +907,39 @@ fn yes_cannot_be_armed_from_the_config() {
 		"a config must never be able to delete without a prompt"
 	);
 }
+
+#[test]
+fn completions_print_a_script_and_scan_nothing() {
+	let t = tmp();
+	// A project with a build dir the run would otherwise clean, to prove
+	// `--completions` short-circuits before anything touches the filesystem.
+	make_crate(&t.path().join("a"), "a");
+	make_build_dir(&t.path().join("a/target"));
+
+	let o = run(t.path(), &["--completions", "zsh", "--yes"]);
+
+	assert!(o.status.success(), "--completions zsh exits cleanly");
+	assert!(
+		stdout(&o).contains("#compdef rustsweep"),
+		"emits a zsh completion script:\n{}",
+		stdout(&o)
+	);
+	assert!(
+		t.path().join("a/target").exists(),
+		"asking for a completion script must not clean anything"
+	);
+}
+
+#[test]
+fn completions_reject_an_unknown_shell() {
+	let t = tmp();
+
+	let o = run(t.path(), &["--completions", "clamshell"]);
+
+	assert!(!o.status.success(), "an unsupported shell is an error, not a silent no-op");
+	assert!(
+		stderr(&o).contains("clamshell"),
+		"the error names the bad value:\n{}",
+		stderr(&o)
+	);
+}

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgMatches, Args, CommandFactory, FromArgMatches, Parser, parser::ValueSource};
+use clap_complete::Shell;
 
 use crate::{
 	clean,
@@ -11,6 +12,22 @@ use crate::{
 	util::{expand_tilde, parse_size},
 };
 
+/// The width help and the generated docs wrap at. Capping it at the command
+/// level keeps a wide terminal from producing help the checked-in copies don't
+/// match; `docs_command` pins it from the other side.
+const DOC_WIDTH: usize = 100;
+
+/// The command as the documentation generators see it: the same definition the
+/// binary uses, with the wrap width fixed rather than sniffed from whatever
+/// terminal happened to run the generator.
+///
+/// Every generated doc artifact — the README usage block, the markdown CLI
+/// reference, the man page — comes through here, which is what keeps the clap
+/// structs the only place any of it is written down.
+pub fn docs_command() -> clap::Command {
+	Cli::command().term_width(DOC_WIDTH)
+}
+
 /// Frees disk space by cleaning the build artifacts of Rust projects under a
 /// directory. Already-clean projects are skipped, workspaces are cleaned once,
 /// and stray/orphaned build dirs are detected by cargo's `CACHEDIR.TAG`.
@@ -19,6 +36,7 @@ use crate::{
 	name = "rustsweep",
 	version,
 	about,
+	max_term_width = DOC_WIDTH,
 	after_help = "Defaults for these options can be set in ~/.config/rustsweep/config.toml \
 (a command-line flag always wins). That file also holds the global ignore list; \
 --ignore adds to it rather than replacing it."
@@ -43,6 +61,12 @@ pub struct Cli {
 	/// file's `ignore` list rather than replacing it.
 	#[arg(long = "ignore", value_name = "PATTERN")]
 	pub ignore: Vec<String>,
+
+	/// Print a completion script for the given shell to stdout and exit. Hidden
+	/// because it's a one-time setup step, not something to weigh on every run;
+	/// generating it from the live command means it can never go stale.
+	#[arg(long, value_name = "SHELL", hide = true)]
+	pub completions: Option<Shell>,
 
 	#[command(flatten)]
 	pub flags: Flags,
@@ -93,6 +117,13 @@ pub fn run_cli() {
 	// enable a bool flag that clap would otherwise report as a plain `false`.
 	let matches = Cli::command().get_matches();
 	let cli = Cli::from_arg_matches(&matches).expect("clap validated the args");
+
+	// Before anything that touches the filesystem: this asks for a script, not a run.
+	if let Some(shell) = cli.completions {
+		print_completions(shell);
+		return;
+	}
+
 	let cfg = config::load();
 
 	configure_thread_pool();
@@ -102,6 +133,13 @@ pub fn run_cli() {
 	let discovery = discover(&resolved.path, resolved.walk);
 	let (workspaces, failed) = build_plan(&discovery.projects);
 	clean::run(resolved.flags, &discovery, &workspaces, &failed);
+}
+
+/// Writes a shell completion script for `shell` to stdout.
+fn print_completions(shell: Shell) {
+	let mut cmd = Cli::command();
+	let name = cmd.get_name().to_string();
+	clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
 }
 
 /// The inputs after merging CLI > config > built-in default.

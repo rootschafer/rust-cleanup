@@ -65,9 +65,18 @@ terminal-ish stdin.
 ## Test
 
 ```bash
-cargo test                     # 18 unit + 46 integration, all pass, ~2s
+cargo test                     # 18 unit + 48 integration + 3 docs, ~2s
 cargo clippy --all-targets     # silent
 cargo fmt --check
+```
+
+The `docs` suite (`tests/docs.rs`) diffs the checked-in CLI documentation — the
+README usage block, `docs/src/cli-reference.md`, `docs/man/rustsweep.1` —
+against what the clap definitions render right now. After any change to a flag,
+its help text, or the version, regenerate rather than hand-editing:
+
+```bash
+UPDATE_DOCS=1 cargo test       # rewrites the three files in place
 ```
 
 ## Gotchas

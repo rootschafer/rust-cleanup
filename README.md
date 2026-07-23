@@ -23,32 +23,66 @@ and a one-line installer (no Rust toolchain needed) — see [Releasing](#releasi
 
 # Usage
 
-Output of `rustsweep --help`:
+Output of `rustsweep -h` — generated from the source, so it can't go stale.
+`rustsweep --help` prints the same options with fuller descriptions:
 
+<!-- BEGIN GENERATED: rustsweep -h -->
 ```
+Frees disk space by cleaning the build artifacts of every Rust project under a directory, including
+the stray build dirs `cargo clean` can't reach.
+
 Usage: rustsweep [OPTIONS]
 
 Options:
   -p, --path <PATH>        Sets the starting directory for the search [default: .]
-  -L, --follow-symlinks    Follow symlinked directories while searching
+  -L, --follow-symlinks    Follow symlinked directories while searching (off by default so the
+                           search can't escape the tree; a cycle guard and --max-depth bound the
+                           traversal)
   -d, --max-depth <DEPTH>  Limit how many directory levels below the search root to descend
-      --ignore <PATTERN>   Never scan (or clean) anything matching this .gitignore-style pattern (repeatable)
-  -y, --yes                Clean everything found without prompting for a yes or a no
+      --ignore <PATTERN>   Never scan (or clean) anything matching this .gitignore-style pattern: a
+                           bare name (`vendor`) matches at any depth, anything else is a glob
+                           matched against the full path (`~/Code/*/target`). Repeatable; adds to
+                           the config file's `ignore` list rather than replacing it
+  -y, --yes                Clean everything found without prompting for a yes or a no. Command-line
+                           only — this one can't be set in the config file
       --orphans            Also remove Cargo build dirs that aren't inside any discovered project
+                           (e.g. left over from `cargo build --target-dir <dir>`)
   -n, --dry-run            Show what would be cleaned without deleting anything or prompting
   -v, --verbose            List the projects that `cargo metadata` could not read
-  -s, --show-size          Show each build dir's size before you decide (and a freed-space total)
-      --keep-days <DAYS>   Keep build dirs touched within the last N days; only clean older ones
-      --keep-size <SIZE>   Only clean build dirs at least this large, e.g. 500MB, 1GiB
+  -s, --show-size          Show each build dir's size before you decide (and a freed-space total).
+                           Measuring walks every target, so this is slower than a normal run
+      --keep-days <DAYS>   Keep (don't clean) build dirs touched within the last N days; only clean
+                           ones untouched for longer. Protects projects you're actively building
+      --keep-size <SIZE>   Only clean build dirs at least this large; keep smaller ones. Accepts
+                           units, e.g. 500MB, 1GiB (1024-based). Measuring sizes walks each target,
+                           so this is slower than a normal run
   -h, --help               Print help
   -V, --version            Print version
+
+Defaults for these options can be set in ~/.config/rustsweep/config.toml (a command-line flag always
+wins). That file also holds the global ignore list; --ignore adds to it rather than replacing it.
 ```
+<!-- END GENERATED -->
 
 A good first run — see what's there without touching anything:
 
 ```sh
 rustsweep --path ~/Code --dry-run --show-size
 ```
+
+## Shell completions
+
+`rustsweep --completions <shell>` writes a completion script to stdout for
+`bash`, `zsh`, `fish`, `elvish`, or `powershell`. It's generated from the live
+command definition, so it can't fall behind the flags:
+
+```sh
+rustsweep --completions zsh > ~/.zfunc/_rustsweep     # then: fpath+=~/.zfunc
+rustsweep --completions bash > /etc/bash_completion.d/rustsweep
+```
+
+A man page ships in every release archive; `man ./rustsweep.1` reads it without
+installing.
 
 # Configuration
 
@@ -130,10 +164,15 @@ To cut a release:
 
 ```sh
 dist plan                     # preview exactly what CI will produce
-# bump `version` in Cargo.toml, commit
+# bump `version` in Cargo.toml and add its CHANGELOG.md section
+UPDATE_DOCS=1 cargo test      # the man page carries the version; refresh it
+git commit -am "Release 0.1.4"
 git tag v0.1.4
 git push --tags               # this is what triggers the release workflow
 ```
+
+`dist` reads `CHANGELOG.md` and uses the section matching the tag as the GitHub
+Release body, so a release with no section gets an empty one.
 
 The workflow builds every target, then creates a GitHub Release with the
 archives, checksums, and the installer scripts attached.
