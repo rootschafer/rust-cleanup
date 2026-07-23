@@ -13,7 +13,7 @@ unless you pass `--yes`.
 From source:
 
 ```sh
-git clone https://github.com/Rottschaferanders/rustsweep
+git clone https://github.com/rootschafer/rustsweep
 cd rustsweep
 cargo install --path .
 ```
