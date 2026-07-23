@@ -42,6 +42,10 @@ pub(crate) struct Discovery {
 /// Walks the tree under `start` once, in parallel, collecting every Cargo
 /// project and every cargo-authored build directory. Prunes ignored directories
 /// and never descends into a cache directory (`CACHEDIR.TAG`).
+///
+/// `start` itself is deliberately never tested against the ignore list — only
+/// the directories below it are. Pointing `--path` straight at an ignored
+/// directory is an explicit request, and it beats the config.
 pub(crate) fn discover(start: &Path, options: WalkOptions) -> Discovery {
 	let spinner = ProgressBar::new_spinner();
 	spinner.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());

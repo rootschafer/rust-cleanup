@@ -109,13 +109,13 @@ impl Tally {
 			self.kept_by_filter += 1;
 			return;
 		}
-		let size = measured.map_or(0, |(bytes, _)| bytes);
+		let size = measured.map_or(0, |m| m.bytes);
 		let sized = with_size(build_dir, measured, flags);
 
 		if flags.dry_run {
 			match &target {
 				Target::Project { root } => {
-					println!("Would clean {} (Cargo project) — build dir {sized}", root.display())
+					println!("Would clean {} — build dir {sized}", root.display())
 				}
 				Target::Stray { project } => {
 					println!("Would remove stray build dir {sized} (inside {})", project.display())
@@ -147,26 +147,43 @@ impl Tally {
 			return;
 		}
 
-		match target {
+		let removed = match target {
 			Target::Project { root } => cargo_clean(root),
 			Target::Stray { .. } | Target::Orphan => remove_dir(build_dir),
+		};
+		// Only count what actually went away, so "Freed ~X" can't be inflated by a
+		// removal that failed.
+		if removed {
+			self.freed += size;
 		}
-		self.freed += size;
 	}
+}
+
+/// What `measure` learned about a build dir. When `complete` is false, part of
+/// the tree couldn't be read, so `bytes` and `newest` are lower bounds.
+#[derive(Clone, Copy)]
+struct Measurement {
+	bytes: u64,
+	newest: SystemTime,
+	complete: bool,
 }
 
 /// Measures a build dir only when a filter or `--show-size` needs it; otherwise
 /// returns `None` so a normal run pays nothing.
-fn measure_if_needed(build_dir: &Path, flags: Flags) -> Option<(u64, SystemTime)> {
+fn measure_if_needed(build_dir: &Path, flags: Flags) -> Option<Measurement> {
 	let needed = flags.keep_days.is_some() || flags.keep_size.is_some() || flags.show_size;
 	needed.then(|| measure(build_dir))
 }
 
 /// Renders a build-dir path, appending its human size in parentheses when
-/// `--show-size` is on and the size is known.
-fn with_size(path: &Path, measured: Option<(u64, SystemTime)>, flags: Flags) -> String {
+/// `--show-size` is on and the size is known. An incomplete measurement is a
+/// lower bound, shown as such.
+fn with_size(path: &Path, measured: Option<Measurement>, flags: Flags) -> String {
 	match (flags.show_size, measured) {
-		(true, Some((bytes, _))) => format!("{} ({})", path.display(), human_size(bytes)),
+		(true, Some(m)) => {
+			let bound = if m.complete { "" } else { "≥ " };
+			format!("{} ({bound}{})", path.display(), human_size(m.bytes))
+		}
 		_ => path.display().to_string(),
 	}
 }
@@ -191,22 +208,26 @@ fn human_size(bytes: u64) -> String {
 /// therefore be cleaned, given its (optional) measurement. Returns `true`
 /// immediately when no filter is set. Note the polarity: we *keep* (return
 /// `false` for) recently-touched or small build dirs, and only clean stale/large
-/// ones. A filter with no measurement (couldn't read it) keeps it, so we never
-/// delete something we failed to inspect.
-fn filters_allow(measured: Option<(u64, SystemTime)>, flags: Flags) -> bool {
+/// ones. A missing or incomplete measurement keeps the dir: an unreadable part of
+/// the tree could be arbitrarily recent or large, so we never delete something we
+/// failed to fully inspect.
+fn filters_allow(measured: Option<Measurement>, flags: Flags) -> bool {
 	if flags.keep_days.is_none() && flags.keep_size.is_none() {
 		return true;
 	}
-	let Some((size, newest)) = measured else {
+	let Some(m) = measured else {
 		return false;
 	};
+	if !m.complete {
+		return false;
+	}
 	if let Some(days) = flags.keep_days
-		&& touched_within(newest, days)
+		&& touched_within(m.newest, days)
 	{
 		return false; // recently built — protect active work
 	}
 	if let Some(min_size) = flags.keep_size
-		&& size < min_size
+		&& m.bytes < min_size
 	{
 		return false; // too small to be worth reclaiming
 	}
@@ -214,36 +235,49 @@ fn filters_allow(measured: Option<(u64, SystemTime)>, flags: Flags) -> bool {
 }
 
 /// Total size in bytes and newest file mtime under `dir`. Walks the whole tree
-/// (the inherent cost of size/age filtering); does not follow symlinks.
-fn measure(dir: &Path) -> (u64, SystemTime) {
-	let mut total = 0u64;
-	let mut newest = SystemTime::UNIX_EPOCH;
+/// (the inherent cost of size/age filtering); does not follow symlinks. Any
+/// entry it fails to read marks the measurement incomplete rather than silently
+/// counting as zero — `filters_allow` depends on that honesty.
+fn measure(dir: &Path) -> Measurement {
+	let mut m = Measurement {
+		bytes: 0,
+		newest: SystemTime::UNIX_EPOCH,
+		complete: true,
+	};
 	let mut stack = vec![dir.to_path_buf()];
 
 	while let Some(current) = stack.pop() {
 		let Ok(entries) = fs::read_dir(&current) else {
+			m.complete = false;
 			continue;
 		};
-		for entry in entries.flatten() {
+		for entry in entries {
+			let Ok(entry) = entry else {
+				m.complete = false;
+				continue;
+			};
 			let Ok(file_type) = entry.file_type() else {
+				m.complete = false;
 				continue;
 			};
 			if file_type.is_dir() {
 				stack.push(entry.path());
-			} else if file_type.is_file()
-				&& let Ok(meta) = entry.metadata()
-			{
-				total += meta.len();
+			} else if file_type.is_file() {
+				let Ok(meta) = entry.metadata() else {
+					m.complete = false;
+					continue;
+				};
+				m.bytes += meta.len();
 				if let Ok(modified) = meta.modified()
-					&& modified > newest
+					&& modified > m.newest
 				{
-					newest = modified;
+					m.newest = modified;
 				}
 			}
 		}
 	}
 
-	(total, newest)
+	m
 }
 
 /// Whether `mtime` is within the last `days` days (clock skew into the future is
@@ -255,19 +289,27 @@ fn touched_within(mtime: SystemTime, days: u64) -> bool {
 	}
 }
 
-fn remove_dir(dir: &Path) {
+/// Removes `dir`, reporting whether it actually went away.
+fn remove_dir(dir: &Path) -> bool {
 	if let Err(e) = fs::remove_dir_all(dir) {
 		eprintln!("Failed to remove {}: {e}", dir.display());
+		return false;
 	}
+	true
 }
 
-fn cargo_clean(dir: &Path) {
+/// Runs `cargo clean` in `dir`, reporting whether it succeeded.
+fn cargo_clean(dir: &Path) -> bool {
 	match Process::new("cargo").arg("clean").current_dir(dir).status() {
 		Ok(status) if !status.success() => {
 			eprintln!("`cargo clean` exited with a nonzero status in {}", dir.display());
+			false
 		}
-		Err(e) => eprintln!("Failed to run `cargo clean` in {}: {e}", dir.display()),
-		Ok(_) => {}
+		Err(e) => {
+			eprintln!("Failed to run `cargo clean` in {}: {e}", dir.display());
+			false
+		}
+		Ok(_) => true,
 	}
 }
 
@@ -337,5 +379,58 @@ fn print_summary(summary: &Summary) {
 		for path in summary.skipped {
 			println!("  {}", path.display());
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn flags(keep_days: Option<u64>, keep_size: Option<u64>) -> Flags {
+		Flags {
+			yes: false,
+			orphans: false,
+			dry_run: false,
+			verbose: false,
+			show_size: false,
+			keep_days,
+			keep_size,
+		}
+	}
+
+	fn measurement(bytes: u64, age_days: u64, complete: bool) -> Measurement {
+		Measurement {
+			bytes,
+			newest: SystemTime::now() - Duration::from_secs(age_days * 86_400),
+			complete,
+		}
+	}
+
+	#[test]
+	fn no_filters_allow_everything_even_unmeasured() {
+		assert!(filters_allow(None, flags(None, None)));
+	}
+
+	#[test]
+	fn keep_days_protects_recent_and_allows_stale() {
+		let f = flags(Some(30), None);
+		assert!(!filters_allow(Some(measurement(0, 5, true)), f), "recent → kept");
+		assert!(filters_allow(Some(measurement(0, 40, true)), f), "stale → cleanable");
+	}
+
+	#[test]
+	fn keep_size_protects_small_and_allows_large() {
+		let f = flags(None, Some(1024));
+		assert!(!filters_allow(Some(measurement(512, 99, true)), f), "small → kept");
+		assert!(filters_allow(Some(measurement(4096, 99, true)), f), "large → cleanable");
+	}
+
+	#[test]
+	fn an_incomplete_measurement_is_always_kept() {
+		// An unreadable subtree could be arbitrarily recent or large; with a filter
+		// set we must never clean what we failed to fully inspect.
+		let stale_and_large = measurement(1 << 30, 400, false);
+		assert!(!filters_allow(Some(stale_and_large), flags(Some(30), None)));
+		assert!(!filters_allow(Some(stale_and_large), flags(None, Some(1024))));
 	}
 }

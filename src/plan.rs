@@ -53,10 +53,13 @@ pub(crate) fn build_plan(projects: &[PathBuf]) -> (Vec<Workspace>, Vec<(PathBuf,
 
 	for (project, result) in root_results {
 		match result {
-			Ok((root, target_dir, member_dirs)) => {
-				handled_roots.push(canonical_or(&root));
-				covered.extend(member_dirs);
-				workspaces.push(Workspace { root, target_dir });
+			Ok(resolved) => {
+				handled_roots.push(canonical_or(&resolved.root));
+				covered.extend(resolved.member_dirs);
+				workspaces.push(Workspace {
+					root: resolved.root,
+					target_dir: resolved.target_dir,
+				});
 			}
 			// A broken workspace root; record it and skip its members below.
 			Err(e) => {
@@ -92,7 +95,10 @@ pub(crate) fn build_plan(projects: &[PathBuf]) -> (Vec<Workspace>, Vec<(PathBuf,
 		match result {
 			// We don't fabricate a build dir on failure: the CACHEDIR.TAG scan handles
 			// any real one, whereas a fake resolved target would mask it from the scan.
-			Ok((root, target_dir, _members)) => workspaces.push(Workspace { root, target_dir }),
+			Ok(resolved) => workspaces.push(Workspace {
+				root: resolved.root,
+				target_dir: resolved.target_dir,
+			}),
 			Err(e) => failed.push((project.clone(), e)),
 		}
 	}
@@ -107,13 +113,20 @@ pub(crate) fn build_plan(projects: &[PathBuf]) -> (Vec<Workspace>, Vec<(PathBuf,
 	(workspaces, failed)
 }
 
+/// What `cargo metadata` reported for one project: its authoritative workspace
+/// root, resolved build directory, and (canonicalized) member directories.
+struct ResolvedProject {
+	root: PathBuf,
+	target_dir: PathBuf,
+	member_dirs: Vec<PathBuf>,
+}
+
 /// Runs `cargo metadata` for each project in parallel, advancing `progress` as
 /// results land. Errors are stringified for later reporting.
-#[allow(clippy::type_complexity)]
 fn resolve_in_parallel<'a>(
 	projects: &[&'a PathBuf],
 	progress: &ProgressBar,
-) -> Vec<(&'a PathBuf, Result<(PathBuf, PathBuf, Vec<PathBuf>), String>)> {
+) -> Vec<(&'a PathBuf, Result<ResolvedProject, String>)> {
 	projects
 		.par_iter()
 		.map(|dir| {
@@ -124,9 +137,9 @@ fn resolve_in_parallel<'a>(
 		.collect()
 }
 
-/// Runs `cargo metadata` for a manifest and returns `(workspace_root,
-/// target_directory, member_dirs)`, or the error if cargo could not read it.
-fn resolve_workspace(dir: &Path) -> Result<(PathBuf, PathBuf, Vec<PathBuf>), cargo_metadata::Error> {
+/// Runs `cargo metadata` for a manifest, or returns the error if cargo could
+/// not read it.
+fn resolve_workspace(dir: &Path) -> Result<ResolvedProject, cargo_metadata::Error> {
 	let metadata = MetadataCommand::new()
 		.manifest_path(dir.join("Cargo.toml"))
 		// Run from inside the project so cargo discovers project-local and global
@@ -149,7 +162,7 @@ fn resolve_workspace(dir: &Path) -> Result<(PathBuf, PathBuf, Vec<PathBuf>), car
 		})
 		.collect();
 
-	Ok((root, target_dir, member_dirs))
+	Ok(ResolvedProject { root, target_dir, member_dirs })
 }
 
 /// Whether `dir`'s `Cargo.toml` declares a workspace (`[workspace]` or any

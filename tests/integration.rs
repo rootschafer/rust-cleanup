@@ -614,6 +614,32 @@ fn keep_size_cleans_large_targets_and_keeps_small_ones() {
 	);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_filter_never_deletes_a_build_dir_it_could_not_fully_measure() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let t = tmp();
+	make_crate(&t.path().join("a"), "a");
+	let target = t.path().join("a/target");
+	make_build_dir(&target);
+	age_build_dir(&target, 40); // reads as long-stale where measurable...
+	// ...but part of it can't be read at all, so its true age/size is unknown.
+	let debug = target.join("debug");
+	fs::set_permissions(&debug, fs::Permissions::from_mode(0o000)).unwrap();
+
+	let o = run(t.path(), &["--keep-days", "30", "--yes"]);
+
+	// Restore before asserting so the TempDir can clean up either way.
+	fs::set_permissions(&debug, fs::Permissions::from_mode(0o755)).unwrap();
+
+	assert!(o.status.success());
+	assert!(
+		target.exists(),
+		"an unmeasurable build dir must be kept, not treated as ancient/empty"
+	);
+}
+
 #[test]
 fn filters_do_not_affect_a_normal_run() {
 	let t = tmp();
@@ -757,6 +783,26 @@ fn cli_ignore_adds_to_the_configs_ignore_list() {
 	assert!(
 		!t.path().join("normal/proj/target").exists(),
 		"an un-ignored project is still cleaned"
+	);
+}
+
+#[test]
+fn the_search_root_itself_is_exempt_from_the_ignore_list() {
+	let t = tmp();
+	let vendor = t.path().join("vendor");
+	let proj = vendor.join("proj");
+	make_crate(&proj, "proj");
+	make_build_dir(&proj.join("target"));
+
+	// Scanning from above, `vendor` is pruned like any other match...
+	run_with_config(t.path(), "ignore = [\"vendor\"]\n", &["--yes"]);
+	assert!(proj.join("target").exists(), "an ignored subtree is untouched");
+
+	// ...but pointing --path straight at it is an explicit request that wins.
+	run_with_config(&vendor, "ignore = [\"vendor\"]\n", &["--yes"]);
+	assert!(
+		!proj.join("target").exists(),
+		"an explicit --path at an ignored dir must still be scanned"
 	);
 }
 

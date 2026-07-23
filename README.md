@@ -21,7 +21,7 @@ cargo install --path .
 Once a version is tagged, the release workflow also publishes prebuilt binaries
 and a one-line installer (no Rust toolchain needed) — see [Releasing](#releasing).
 
-# Usage:
+# Usage
 
 Output of `rustsweep --help`:
 
@@ -102,6 +102,10 @@ matched against each directory's full path, which needs a path resolution per
 directory (on a 60k-directory tree that's roughly a 45% slower scan). Prefer a
 bare name when it says what you mean.
 
+The search root itself is exempt: pointing `--path` directly at an ignored
+directory scans it anyway — an explicit target on the command line beats the
+ignore list. The patterns still apply to the directories beneath it.
+
 ## Notes
 
 - An unknown key is an error, so a typo can't silently do nothing. A broken
@@ -109,6 +113,10 @@ bare name when it says what you mean.
   continues with the built-in defaults.
 - `--show-size`, `--keep-days`, and `--keep-size` each have to measure every
   build dir, which walks its whole tree. A run without them never pays that.
+- Sizes are *apparent* sizes (the sum of file lengths), so totals can differ a
+  little from `du`, which counts allocated disk blocks. If part of a build dir
+  can't be read, its size is shown as a lower bound (`≥`), and `--keep-days` /
+  `--keep-size` keep it rather than judging it on incomplete numbers.
 
 # Releasing
 
