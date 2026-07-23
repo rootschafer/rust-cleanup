@@ -10,6 +10,9 @@ done. Ordered so each stage is useful on its own.
 > `main`, except for the four steps that are Anders' to take: `git push`,
 > tagging `v0.1.4`, enabling GitHub Pages, and the crates.io publish. See the
 > per-stage notes below and the addendum in `review-handoff.md`.
+>
+> **`stages-0-2-handoff.md` is the review request** — what was found that this
+> plan didn't anticipate, and the four places the execution departed from it.
 
 ---
 
