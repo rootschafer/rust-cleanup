@@ -28,6 +28,7 @@
 //! (Those three stages are private modules — the pipeline is an implementation
 //! detail of the binary, not a supported API.)
 
+/// Library documentation. If you're here to use the `rustsweep` cli: you should stop and go to the User Guide at <https://rootschafer.github.io/rustsweep/>
 pub mod cli;
 
 mod clean;
