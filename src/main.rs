@@ -1,3 +1,3 @@
 fn main() {
-	rust_cleanup::cli::run_cli();
+	rustsweep::cli::run_cli();
 }

@@ -1,35 +1,39 @@
-# rust-cleanup
+# rustsweep
 
-A simple tool to save space on your computer by cleaning up build files for rust projects. Supports regular Rust projects and Dioxus projects. 
-
+A simple tool to save space on your computer by cleaning up the build artifacts
+of Rust projects. Point it at a directory; it finds every Cargo project beneath
+it, cleans each workspace once, and also removes the stray build dirs `cargo
+clean` can't reach — renamed `target/`s, dirs left behind by
+`--target-dir`, and (behind `--orphans`) build dirs with no project around them
+at all. Already-clean projects are skipped. Nothing is deleted without a `y`
+unless you pass `--yes`.
 
 # Install
 
-I choose to not publish this crate on crates.io because it's not properly documented yet.
+From source:
 
-1. Clone the github repo somewhere
-
-2. Install with:
-
-```rust
+```sh
+git clone https://github.com/Rottschaferanders/rustsweep
+cd rustsweep
 cargo install --path .
 ```
 
+Once a version is tagged, the release workflow also publishes prebuilt binaries
+and a one-line installer (no Rust toolchain needed) — see [Releasing](#releasing).
+
 # Usage:
 
-Output of `rust-cleanup --help`:
+Output of `rustsweep --help`:
 
 ```
-Usage: rust-cleanup [OPTIONS]
+Usage: rustsweep [OPTIONS]
 
 Options:
   -p, --path <PATH>        Sets the starting directory for the search [default: .]
   -L, --follow-symlinks    Follow symlinked directories while searching
   -d, --max-depth <DEPTH>  Limit how many directory levels below the search root to descend
-      --ignore <PATH>      Never scan (or clean) anything inside this directory (repeatable)
-      --yes-cargo          Automatically clean non-Dioxus Rust projects without prompting
-      --yes-dioxus         Automatically clean Dioxus projects without prompting
-  -y, --yes-all            Automatically clean all projects without prompting for a yes or a no
+      --ignore <PATTERN>   Never scan (or clean) anything matching this .gitignore-style pattern (repeatable)
+  -y, --yes                Clean everything found without prompting for a yes or a no
       --orphans            Also remove Cargo build dirs that aren't inside any discovered project
   -n, --dry-run            Show what would be cleaned without deleting anything or prompting
   -v, --verbose            List the projects that `cargo metadata` could not read
@@ -40,11 +44,17 @@ Options:
   -V, --version            Print version
 ```
 
+A good first run — see what's there without touching anything:
+
+```sh
+rustsweep --path ~/Code --dry-run --show-size
+```
+
 # Configuration
 
 Persistent defaults can live in an **optional** config file at
-`~/.config/rust-cleanup/config.toml` (or `$XDG_CONFIG_HOME/rust-cleanup/config.toml`
-if that's set; `$RUST_CLEANUP_CONFIG` overrides both). With no config file,
+`~/.config/rustsweep/config.toml` (or `$XDG_CONFIG_HOME/rustsweep/config.toml`
+if that's set; `$RUSTSWEEP_CONFIG` overrides both). With no config file,
 behavior is exactly as it is without one — nothing to set up.
 
 **Precedence is CLI flag > config value > built-in default**, per setting. So a
@@ -59,27 +69,72 @@ show_size = true
 # keep_days = 14        # keep dirs touched within the last N days
 # keep_size = "500MiB"  # only clean dirs at least this big
 
-# Auto-clean without prompting. Powerful — enable deliberately.
-# yes_all = false
-
-# --- global ignore: never scanned, so never cleaned ---
-ignore_paths = ["~/Code/Rust/EMBED/ESP"]  # whole trees, by path prefix
-ignore_names = ["vendor", "third_party"]  # dir names, pruned anywhere
+# Never scanned, so never cleaned — .gitignore-style patterns.
+ignore = ["vendor", "~/Code/Rust/EMBED/ESP", "**/build-cache"]
 ```
 
 See [`config.example.toml`](config.example.toml) for the annotated full set.
 
-Notes:
+**There is no `yes` key.** Cleaning without a prompt is the one irreversible
+thing this tool does, so `--yes` has to be given per run rather than left armed
+in a file.
 
-- **Ignore lists are additive.** `--ignore <PATH>` *adds to* `ignore_paths`
-  rather than replacing it, and `ignore_names` adds to the always-pruned
-  built-ins (`.git`, `node_modules`, `.jj`). Nothing in the config can
-  *un*-protect a directory.
-- `ignore_paths` matches by path prefix, so a whole subtree is skipped;
-  `ignore_names` matches a directory's name at any depth. A leading `~` is
-  expanded in both (and in `path`).
+## Ignore patterns
+
+`ignore` (and the repeatable `--ignore <PATTERN>` flag, which *adds to* it rather
+than replacing it) takes `.gitignore`-style patterns:
+
+| Pattern | Matches |
+| --- | --- |
+| `vendor` | a directory named `vendor`, at any depth |
+| `**/build-cache` | the same thing, written as an explicit glob |
+| `~/Code/*/scratch` | a glob on the full path — `*` stops at a `/`, `**` spans them |
+| `/opt/toolchains` | that directory and everything under it |
+
+A leading `~` is expanded, and `./x` resolves against the current directory.
+Matching a directory prunes the whole subtree, so nothing inside it is ever
+scanned or cleaned. `.git`, `node_modules`, and `.jj` are always ignored;
+patterns add to that floor and can't remove from it.
+
+Bare names cost nothing — they're compared against directory names during the
+walk, exactly like the built-ins. A pattern containing `/` or a glob character is
+matched against each directory's full path, which needs a path resolution per
+directory (on a 60k-directory tree that's roughly a 45% slower scan). Prefer a
+bare name when it says what you mean.
+
+## Notes
+
 - An unknown key is an error, so a typo can't silently do nothing. A broken
   config prints a warning naming the file and the problem, then the run
   continues with the built-in defaults.
-- If auto-cleaning is enabled by the config rather than the command line, the
-  run says so before deleting anything.
+- `--show-size`, `--keep-days`, and `--keep-size` each have to measure every
+  build dir, which walks its whole tree. A run without them never pays that.
+
+# Releasing
+
+Releases are built by [dist](https://github.com/axodotdev/cargo-dist). Its config
+lives in `dist-workspace.toml`, and `.github/workflows/release.yml` is generated
+from it — **edit the config, then re-run `dist generate`; never hand-edit the
+workflow.** Current targets: macOS (arm64 + x86_64), Linux (arm64 + x86_64), and
+Windows (x86_64), plus shell and PowerShell installers.
+
+To cut a release:
+
+```sh
+dist plan                     # preview exactly what CI will produce
+# bump `version` in Cargo.toml, commit
+git tag v0.1.4
+git push --tags               # this is what triggers the release workflow
+```
+
+The workflow builds every target, then creates a GitHub Release with the
+archives, checksums, and the installer scripts attached.
+
+Useful locally:
+
+- `dist build` — build the artifacts for the current platform only, into
+  `target/distrib/`. Good for checking an archive's contents before tagging.
+- `dist init` — re-run the setup wizard after changing package metadata.
+
+Upgrading dist: install the new version, bump `cargo-dist-version` in
+`dist-workspace.toml`, then `dist generate`.

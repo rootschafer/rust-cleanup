@@ -1,5 +1,5 @@
 //! End-to-end tests: build a tree of dummy Cargo projects in a temp dir, run the
-//! real `rust-cleanup` binary against it, and assert on the resulting filesystem
+//! real `rustsweep` binary against it, and assert on the resulting filesystem
 //! state and output. Fixtures use fabricated build directories (a cargo-authored
 //! `CACHEDIR.TAG`) so we don't need to actually compile anything — `cargo clean`
 //! still removes a project's real target dir, and the scan removes strays.
@@ -21,7 +21,7 @@ const OTHER_TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n\
 	# created by some other tool\n";
 
 fn bin() -> &'static str {
-	env!("CARGO_BIN_EXE_rust-cleanup")
+	env!("CARGO_BIN_EXE_rustsweep")
 }
 
 fn tmp() -> TempDir {
@@ -40,11 +40,6 @@ fn make_crate(dir: &Path, name: &str) {
 		&format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
 	);
 	write(&dir.join("src/lib.rs"), "");
-}
-
-fn make_dioxus(dir: &Path, name: &str) {
-	make_crate(dir, name);
-	write(&dir.join("Dioxus.toml"), "[application]\n");
 }
 
 /// A (virtual) workspace manifest listing `members`.
@@ -71,7 +66,7 @@ fn make_other_cache(dir: &Path) {
 }
 
 /// Points the binary at a config file that doesn't exist, so a real
-/// `~/.config/rust-cleanup/config.toml` on the machine running the tests can
+/// `~/.config/rustsweep/config.toml` on the machine running the tests can
 /// never perturb them.
 fn no_config(root: &Path) -> std::path::PathBuf {
 	root.join("no-such-config.toml")
@@ -82,7 +77,7 @@ fn run(root: &Path, args: &[&str]) -> Output {
 		.arg("--path")
 		.arg(root)
 		.args(args)
-		.env("RUST_CLEANUP_CONFIG", no_config(root))
+		.env("RUSTSWEEP_CONFIG", no_config(root))
 		.stdin(Stdio::null()) // closed stdin => any prompt answers "no"
 		.output()
 		.unwrap()
@@ -96,7 +91,7 @@ fn run_with_config(root: &Path, config: &str, args: &[&str]) -> Output {
 		.arg("--path")
 		.arg(root)
 		.args(args)
-		.env("RUST_CLEANUP_CONFIG", &cfg)
+		.env("RUSTSWEEP_CONFIG", &cfg)
 		.stdin(Stdio::null())
 		.output()
 		.unwrap()
@@ -107,7 +102,7 @@ fn run_input(root: &Path, args: &[&str], input: &str) -> Output {
 		.arg("--path")
 		.arg(root)
 		.args(args)
-		.env("RUST_CLEANUP_CONFIG", no_config(root))
+		.env("RUSTSWEEP_CONFIG", no_config(root))
 		.stdin(Stdio::piped())
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped())
@@ -143,7 +138,7 @@ fn already_clean_project_is_left_alone() {
 	let t = tmp();
 	make_crate(&t.path().join("a"), "a");
 
-	let o = run(t.path(), &["--yes-all"]);
+	let o = run(t.path(), &["--yes"]);
 
 	assert!(o.status.success());
 	assert!(stdout(&o).contains("were already clean"));
@@ -155,7 +150,7 @@ fn standalone_project_target_is_cleaned() {
 	make_crate(&t.path().join("a"), "a");
 	make_build_dir(&t.path().join("a/target"));
 
-	run(t.path(), &["--yes-all"]);
+	run(t.path(), &["--yes"]);
 
 	assert!(!t.path().join("a/target").exists(), "target should be gone");
 }
@@ -192,7 +187,7 @@ fn workspace_is_cleaned_once_at_the_root() {
 	make_crate(&ws.join("crates/bar"), "bar");
 	make_build_dir(&ws.join("target")); // shared build dir at the root
 
-	let o = run(t.path(), &["--yes-all"]);
+	let o = run(t.path(), &["--yes"]);
 
 	assert!(o.status.success());
 	assert!(!ws.join("target").exists(), "workspace target cleaned");
@@ -207,7 +202,7 @@ fn workspace_member_stray_target_is_removed() {
 	make_build_dir(&ws.join("target")); // real shared build dir
 	make_build_dir(&ws.join("foo/target")); // stray left in a member
 
-	run(t.path(), &["--yes-all"]);
+	run(t.path(), &["--yes"]);
 
 	assert!(!ws.join("target").exists(), "shared target cleaned");
 	assert!(!ws.join("foo/target").exists(), "member stray removed");
@@ -222,7 +217,7 @@ fn detached_child_is_skipped_quietly_but_its_build_dir_is_removed() {
 	make_crate(&ws.join("detached"), "detached"); // present but NOT a member
 	make_build_dir(&ws.join("detached/target"));
 
-	let o = run(t.path(), &["--yes-all", "-v"]);
+	let o = run(t.path(), &["--yes", "-v"]);
 	let out = stdout(&o);
 
 	assert!(!ws.join("detached/target").exists(), "detached build dir removed by scan");
@@ -241,7 +236,7 @@ fn relocated_build_dir_and_stray_are_both_removed() {
 	make_build_dir(&p.join("custom")); // the resolved build dir (via config)
 	make_build_dir(&p.join("target")); // a leftover default dir → stray
 
-	run(t.path(), &["--yes-all"]);
+	run(t.path(), &["--yes"]);
 
 	assert!(!p.join("custom").exists(), "relocated build dir cleaned");
 	assert!(!p.join("target").exists(), "stray default target removed");
@@ -255,7 +250,7 @@ fn renamed_build_dir_inside_project_is_removed() {
 	// No `target/`; only a differently-named cargo build dir left behind.
 	make_build_dir(&p.join("old-target"));
 
-	run(t.path(), &["--yes-all"]);
+	run(t.path(), &["--yes"]);
 
 	assert!(!p.join("old-target").exists(), "renamed build dir removed");
 }
@@ -269,7 +264,7 @@ fn orphan_build_dir_needs_the_orphans_flag() {
 	assert!(t.path().join("loose").exists(), "orphan kept without --orphans");
 	assert!(stdout(&o).contains("orphaned"), "hint about --orphans shown");
 
-	run(t.path(), &["--orphans", "--yes-all"]);
+	run(t.path(), &["--orphans", "--yes"]);
 	assert!(!t.path().join("loose").exists(), "orphan removed with --orphans");
 }
 
@@ -278,7 +273,7 @@ fn non_cargo_cache_dir_is_never_removed() {
 	let t = tmp();
 	make_other_cache(&t.path().join("cache"));
 
-	run(t.path(), &["--orphans", "--yes-all"]);
+	run(t.path(), &["--orphans", "--yes"]);
 
 	assert!(
 		t.path().join("cache/CACHEDIR.TAG").exists(),
@@ -298,7 +293,7 @@ fn broken_manifest_is_summarized_but_its_build_dir_still_removed() {
 	write(&p.join("src/lib.rs"), "");
 	make_build_dir(&p.join("target"));
 
-	let o = run(t.path(), &["--yes-all", "-v"]);
+	let o = run(t.path(), &["--yes", "-v"]);
 	let out = stdout(&o);
 
 	assert!(!p.join("target").exists(), "build dir removed via scan");
@@ -313,39 +308,13 @@ fn dry_run_deletes_nothing() {
 	make_build_dir(&t.path().join("a/target"));
 	make_build_dir(&t.path().join("loose"));
 
-	let o = run(t.path(), &["--dry-run", "--orphans", "--yes-all"]);
+	let o = run(t.path(), &["--dry-run", "--orphans", "--yes"]);
 	let out = stdout(&o);
 
 	assert!(t.path().join("a/target").exists(), "dry run kept target");
 	assert!(t.path().join("loose").exists(), "dry run kept orphan");
 	assert!(out.contains("Would clean"));
 	assert!(out.contains("Would remove orphaned"));
-}
-
-#[test]
-fn yes_cargo_cleans_rust_but_not_dioxus() {
-	let t = tmp();
-	make_crate(&t.path().join("rs"), "rs");
-	make_build_dir(&t.path().join("rs/target"));
-	make_dioxus(&t.path().join("dx"), "dx");
-	make_build_dir(&t.path().join("dx/target"));
-
-	// --yes-cargo auto-cleans Rust; the Dioxus prompt hits closed stdin => "no".
-	run(t.path(), &["--yes-cargo"]);
-
-	assert!(!t.path().join("rs/target").exists(), "rust project cleaned");
-	assert!(t.path().join("dx/target").exists(), "dioxus project untouched");
-}
-
-#[test]
-fn yes_dioxus_cleans_dioxus() {
-	let t = tmp();
-	make_dioxus(&t.path().join("dx"), "dx");
-	make_build_dir(&t.path().join("dx/target"));
-
-	run(t.path(), &["--yes-dioxus"]);
-
-	assert!(!t.path().join("dx/target").exists(), "dioxus project cleaned");
 }
 
 #[test]
@@ -356,7 +325,7 @@ fn pruned_directories_are_not_searched() {
 	make_crate(&buried, "pkg");
 	make_build_dir(&buried.join("target"));
 
-	run(t.path(), &["--orphans", "--yes-all"]);
+	run(t.path(), &["--orphans", "--yes"]);
 
 	assert!(
 		buried.join("target").exists(),
@@ -382,7 +351,7 @@ fn nested_independent_workspace_is_also_cleaned() {
 	write(&b.join("src/lib.rs"), "");
 	make_build_dir(&b.join("target"));
 
-	let o = run(t.path(), &["--yes-all"]);
+	let o = run(t.path(), &["--yes"]);
 
 	assert!(o.status.success());
 	assert!(!a.join("target").exists(), "outer workspace cleaned");
@@ -400,7 +369,7 @@ fn symlinks_are_not_followed_by_default() {
 	fs::create_dir_all(t.path().join("scan")).unwrap();
 	symlink(&t.path().join("ext"), &t.path().join("scan/link"));
 
-	run(&t.path().join("scan"), &["--yes-all"]);
+	run(&t.path().join("scan"), &["--yes"]);
 
 	assert!(
 		t.path().join("ext/proj/target").exists(),
@@ -417,7 +386,7 @@ fn follow_symlinks_reaches_linked_projects() {
 	fs::create_dir_all(t.path().join("scan")).unwrap();
 	symlink(&t.path().join("ext"), &t.path().join("scan/link"));
 
-	run(&t.path().join("scan"), &["--follow-symlinks", "--yes-all"]);
+	run(&t.path().join("scan"), &["--follow-symlinks", "--yes"]);
 
 	assert!(
 		!t.path().join("ext/proj/target").exists(),
@@ -435,7 +404,7 @@ fn symlink_cycle_does_not_hang() {
 	symlink(&proj, &proj.join("loop")); // self-referential link
 
 	// If the cycle guard were missing this would spin forever (test timeout).
-	let o = run(t.path(), &["--follow-symlinks", "--yes-all"]);
+	let o = run(t.path(), &["--follow-symlinks", "--yes"]);
 
 	assert!(o.status.success());
 	assert!(!proj.join("target").exists(), "project still cleaned despite the cycle");
@@ -449,10 +418,10 @@ fn max_depth_bounds_the_search() {
 	make_crate(&proj, "proj");
 	make_build_dir(&proj.join("target"));
 
-	run(t.path(), &["--max-depth", "1", "--yes-all"]);
+	run(t.path(), &["--max-depth", "1", "--yes"]);
 	assert!(proj.join("target").exists(), "depth 1 shouldn't reach proj at depth 2");
 
-	run(t.path(), &["--max-depth", "2", "--yes-all"]);
+	run(t.path(), &["--max-depth", "2", "--yes"]);
 	assert!(!proj.join("target").exists(), "depth 2 reaches and cleans proj");
 }
 
@@ -462,7 +431,7 @@ fn max_depth_zero_scans_only_the_root() {
 	make_crate(&t.path().join("proj"), "proj");
 	make_build_dir(&t.path().join("proj/target"));
 
-	run(t.path(), &["--max-depth", "0", "--yes-all"]);
+	run(t.path(), &["--max-depth", "0", "--yes"]);
 
 	assert!(t.path().join("proj/target").exists(), "--max-depth 0 should not descend at all");
 }
@@ -478,7 +447,7 @@ fn glob_workspace_members_are_cleaned_once() {
 	make_crate(&ws.join("crates/y"), "y");
 	make_build_dir(&ws.join("target"));
 
-	let o = run(t.path(), &["--yes-all"]);
+	let o = run(t.path(), &["--yes"]);
 
 	assert!(o.status.success());
 	assert!(!ws.join("target").exists(), "globbed workspace cleaned at the root");
@@ -496,7 +465,7 @@ fn excluded_member_build_dir_is_still_removed_quietly() {
 	make_crate(&ws.join("b"), "b"); // excluded from the workspace
 	make_build_dir(&ws.join("b/target"));
 
-	let o = run(t.path(), &["--yes-all", "-v"]);
+	let o = run(t.path(), &["--yes", "-v"]);
 
 	assert!(!ws.join("b/target").exists(), "excluded crate's build dir removed by scan");
 	assert!(
@@ -514,7 +483,7 @@ fn untagged_target_is_still_cleaned_by_cargo() {
 	// resolved build dir, so pass-1 `cargo clean` must still remove it.
 	write(&a.join("target/junk"), "x");
 
-	run(t.path(), &["--yes-all"]);
+	run(t.path(), &["--yes"]);
 
 	assert!(!a.join("target").exists(), "cargo clean removes the resolved target");
 }
@@ -533,7 +502,7 @@ fn projects_sharing_one_build_dir_are_deduped() {
 	}
 	make_build_dir(&shared);
 
-	let o = run(t.path(), &["--yes-all"]);
+	let o = run(t.path(), &["--yes"]);
 
 	assert!(o.status.success());
 	assert!(!shared.exists(), "the shared build dir is cleaned exactly once");
@@ -546,7 +515,7 @@ fn project_at_the_search_root_is_cleaned() {
 	make_crate(&proj, "proj");
 	make_build_dir(&proj.join("target"));
 
-	run(&proj, &["--yes-all"]); // point --path straight at the crate
+	run(&proj, &["--yes"]); // point --path straight at the crate
 
 	assert!(!proj.join("target").exists());
 }
@@ -559,7 +528,7 @@ fn deeply_nested_workspace_members_are_covered() {
 	make_crate(&ws.join("a/b/c"), "c");
 	make_build_dir(&ws.join("target"));
 
-	run(t.path(), &["--yes-all"]);
+	run(t.path(), &["--yes"]);
 
 	assert!(!ws.join("target").exists());
 }
@@ -573,7 +542,7 @@ fn a_crate_inside_a_build_dir_is_ignored() {
 	make_crate(&bd.join("nested"), "nested");
 	make_build_dir(&bd.join("nested/target"));
 
-	run(t.path(), &["--yes-all"]); // no --orphans
+	run(t.path(), &["--yes"]); // no --orphans
 
 	assert!(
 		bd.join("nested/target").exists(),
@@ -610,7 +579,7 @@ fn keep_days_protects_recent_projects_and_cleans_stale_ones() {
 	make_build_dir(&t.path().join("stale/target"));
 	age_build_dir(&t.path().join("stale/target"), 40); // untouched for 40 days
 
-	run(t.path(), &["--keep-days", "30", "--yes-all"]);
+	run(t.path(), &["--keep-days", "30", "--yes"]);
 
 	assert!(
 		t.path().join("fresh/target").exists(),
@@ -633,7 +602,7 @@ fn keep_size_cleans_large_targets_and_keeps_small_ones() {
 	make_crate(&t.path().join("small"), "small");
 	make_build_dir(&t.path().join("small/target"));
 
-	run(t.path(), &["--keep-size", "1MiB", "--yes-all"]);
+	run(t.path(), &["--keep-size", "1MiB", "--yes"]);
 
 	assert!(
 		!t.path().join("big/target").exists(),
@@ -651,7 +620,7 @@ fn filters_do_not_affect_a_normal_run() {
 	make_crate(&t.path().join("a"), "a");
 	make_build_dir(&t.path().join("a/target"));
 
-	run(t.path(), &["--yes-all"]); // no filters → unchanged behavior
+	run(t.path(), &["--yes"]); // no filters → unchanged behavior
 
 	assert!(!t.path().join("a/target").exists());
 }
@@ -678,16 +647,11 @@ fn config_can_enable_a_flag_the_cli_omits() {
 	let t = tmp();
 	make_build_dir(&t.path().join("loose")); // an orphan: needs --orphans
 
-	let o = run_with_config(t.path(), "orphans = true\nyes_all = true\n", &[]);
+	let o = run_with_config(t.path(), "orphans = true\n", &["--yes"]);
 
 	assert!(
 		!t.path().join("loose").exists(),
-		"config-set orphans + yes_all should remove the orphan:\n{}",
-		stdout(&o)
-	);
-	assert!(
-		stdout(&o).contains("enabled by the config file"),
-		"auto-cleaning from config should announce itself:\n{}",
+		"config-set orphans should let --yes remove the orphan:\n{}",
 		stdout(&o)
 	);
 }
@@ -714,17 +678,17 @@ fn cli_option_overrides_the_config_value() {
 	make_crate(&proj, "proj");
 	make_build_dir(&proj.join("target"));
 
-	let cfg = "max_depth = 1\nyes_all = true\n";
+	let cfg = "max_depth = 1\n";
 
-	run_with_config(t.path(), cfg, &[]);
+	run_with_config(t.path(), cfg, &["--yes"]);
 	assert!(proj.join("target").exists(), "config's max_depth = 1 applies");
 
-	run_with_config(t.path(), cfg, &["--max-depth", "5"]);
+	run_with_config(t.path(), cfg, &["--max-depth", "5", "--yes"]);
 	assert!(!proj.join("target").exists(), "the CLI's --max-depth wins");
 }
 
 #[test]
-fn config_ignore_paths_protects_a_subtree() {
+fn config_ignore_protects_a_subtree() {
 	let t = tmp();
 	let skipped = t.path().join("skip/proj");
 	make_crate(&skipped, "skipped");
@@ -733,21 +697,21 @@ fn config_ignore_paths_protects_a_subtree() {
 	make_crate(&normal, "normal");
 	make_build_dir(&normal.join("target"));
 
-	let cfg = format!("yes_all = true\nignore_paths = [\"{}\"]\n", t.path().join("skip").display());
-	run_with_config(t.path(), &cfg, &[]);
+	let cfg = format!("ignore = [\"{}\"]\n", t.path().join("skip").display());
+	run_with_config(t.path(), &cfg, &["--yes"]);
 
 	assert!(skipped.join("target").exists(), "an ignored tree is never scanned");
 	assert!(!normal.join("target").exists(), "its siblings are still cleaned");
 }
 
 #[test]
-fn config_ignore_names_prunes_by_directory_name() {
+fn a_bare_name_pattern_prunes_by_directory_name() {
 	let t = tmp();
 	let buried = t.path().join("vendor/proj");
 	make_crate(&buried, "buried");
 	make_build_dir(&buried.join("target"));
 
-	run_with_config(t.path(), "yes_all = true\nignore_names = [\"vendor\"]\n", &[]);
+	run_with_config(t.path(), "ignore = [\"vendor\"]\n", &["--yes"]);
 
 	assert!(
 		buried.join("target").exists(),
@@ -766,14 +730,14 @@ fn ignore_flag_protects_a_subtree_without_a_config() {
 	make_build_dir(&normal.join("target"));
 
 	let skip_arg = t.path().join("skip");
-	run(t.path(), &["--yes-all", "--ignore", skip_arg.to_str().unwrap()]);
+	run(t.path(), &["--yes", "--ignore", skip_arg.to_str().unwrap()]);
 
 	assert!(skipped.join("target").exists(), "--ignore protects the subtree");
 	assert!(!normal.join("target").exists(), "and nothing else");
 }
 
 #[test]
-fn cli_ignore_adds_to_the_configs_ignore_paths() {
+fn cli_ignore_adds_to_the_configs_ignore_list() {
 	let t = tmp();
 	for name in ["from-config", "from-cli", "normal"] {
 		let p = t.path().join(name).join("proj");
@@ -781,12 +745,9 @@ fn cli_ignore_adds_to_the_configs_ignore_paths() {
 		make_build_dir(&p.join("target"));
 	}
 
-	let cfg = format!(
-		"yes_all = true\nignore_paths = [\"{}\"]\n",
-		t.path().join("from-config").display()
-	);
+	let cfg = format!("ignore = [\"{}\"]\n", t.path().join("from-config").display());
 	let cli_ignore = t.path().join("from-cli");
-	run_with_config(t.path(), &cfg, &["--ignore", cli_ignore.to_str().unwrap()]);
+	run_with_config(t.path(), &cfg, &["--yes", "--ignore", cli_ignore.to_str().unwrap()]);
 
 	assert!(
 		t.path().join("from-config/proj/target").exists(),
@@ -805,7 +766,7 @@ fn malformed_config_warns_and_falls_back_to_defaults() {
 	make_crate(&t.path().join("a"), "a");
 	make_build_dir(&t.path().join("a/target"));
 
-	let o = run_with_config(t.path(), "orphan = true\nthis is not toml\n", &["--yes-all"]);
+	let o = run_with_config(t.path(), "orphan = true\nthis is not toml\n", &["--yes"]);
 
 	assert!(
 		stderr(&o).contains("invalid config"),
@@ -824,8 +785,8 @@ fn a_missing_config_behaves_like_no_config() {
 	let o = Command::new(bin())
 		.arg("--path")
 		.arg(t.path())
-		.arg("--yes-all")
-		.env("RUST_CLEANUP_CONFIG", t.path().join("nope.toml"))
+		.arg("--yes")
+		.env("RUSTSWEEP_CONFIG", t.path().join("nope.toml"))
 		.stdin(Stdio::null())
 		.output()
 		.unwrap();
@@ -848,8 +809,55 @@ fn config_keep_size_filters_like_the_flag() {
 	make_crate(&t.path().join("small"), "small");
 	make_build_dir(&t.path().join("small/target"));
 
-	run_with_config(t.path(), "yes_all = true\nkeep_size = \"1MiB\"\n", &[]);
+	run_with_config(t.path(), "keep_size = \"1MiB\"\n", &["--yes"]);
 
 	assert!(!t.path().join("big/target").exists(), "large target cleaned");
 	assert!(t.path().join("small/target").exists(), "small target kept");
+}
+
+#[test]
+fn ignore_accepts_glob_patterns() {
+	let t = tmp();
+	// Two projects one level down; only the one under a `*/generated` path is skipped.
+	let skipped = t.path().join("a/generated");
+	make_crate(&skipped, "skipped");
+	make_build_dir(&skipped.join("target"));
+	let normal = t.path().join("b/kept");
+	make_crate(&normal, "kept");
+	make_build_dir(&normal.join("target"));
+
+	let cfg = format!("ignore = [\"{}/*/generated\"]\n", t.path().display());
+	run_with_config(t.path(), &cfg, &["--yes"]);
+
+	assert!(skipped.join("target").exists(), "the glob should prune a/generated");
+	assert!(!normal.join("target").exists(), "b/kept doesn't match the glob");
+}
+
+#[test]
+fn a_relative_glob_matches_at_any_depth() {
+	let t = tmp();
+	let skipped = t.path().join("deep/nested/build-cache/proj");
+	make_crate(&skipped, "skipped");
+	make_build_dir(&skipped.join("target"));
+
+	run_with_config(t.path(), "ignore = [\"**/build-cache\"]\n", &["--yes"]);
+
+	assert!(skipped.join("target").exists(), "**/build-cache matches wherever it sits");
+}
+
+#[test]
+fn yes_cannot_be_armed_from_the_config() {
+	let t = tmp();
+	make_crate(&t.path().join("a"), "a");
+	make_build_dir(&t.path().join("a/target"));
+
+	// `yes` is not a config key, so this is a typo as far as the loader is concerned:
+	// it warns, falls back to defaults, and the (closed) prompt answers "no".
+	let o = run_with_config(t.path(), "yes = true\n", &[]);
+
+	assert!(stderr(&o).contains("invalid config"), "unknown key warns:\n{}", stderr(&o));
+	assert!(
+		t.path().join("a/target").exists(),
+		"a config must never be able to delete without a prompt"
+	);
 }

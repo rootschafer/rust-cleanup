@@ -1,8 +1,11 @@
-# rust-cleanup config — copy to ~/.config/rust-cleanup/config.toml
+# rustsweep config — copy to ~/.config/rustsweep/config.toml
 #
 # Every key is optional, and a command-line flag always overrides the value here.
 # Unknown keys are an error (so a typo can't silently do nothing); an invalid
 # file warns and the run continues with the built-in defaults.
+#
+# Note there is no `yes` key: cleaning without a prompt is the one thing here
+# you can't undo, so `--yes` has to be given per run.
 
 # Default search dir when --path is omitted. A leading ~ is expanded.
 # path = "~/Code"
@@ -17,21 +20,26 @@
 # verbose   = false
 # dry_run   = false
 
-# Auto-clean without prompting. Powerful — enable deliberately. Runs that
-# auto-clean because of this file say so before doing anything.
-# yes_all    = false
-# yes_cargo  = false
-# yes_dioxus = false
-
 # --- filters (same meaning/polarity as the flags) ---
 # keep_days = 14          # keep dirs touched within the last N days
 # keep_size = "500MiB"    # only clean dirs at least this big
 
-# --- global ignore (never scanned, so never cleaned) ---
-# ignore_paths: whole trees, matched by path prefix. A leading ~ is expanded.
-# ignore_paths = [
+# --- global ignore: never scanned, so never cleaned ---
+# .gitignore-style patterns. `--ignore <PATTERN>` adds to this list; it never
+# replaces it. The built-ins (.git, node_modules, .jj) are always ignored.
+#
+#   vendor            a bare name — matches a dir called `vendor` at any depth
+#   **/build-cache    same idea, written as an explicit glob
+#   ~/Code/*/scratch  a glob on the full path; `*` stops at a `/`, `**` doesn't
+#   /opt/toolchains   a plain path — that dir and everything under it
+#
+# Bare names are free: they're compared against directory names during the walk
+# the same way the built-ins are. A pattern with a `/` or a glob character is
+# matched against each directory's full path, which costs a path resolution per
+# directory — noticeable on a very large tree, so prefer bare names when they say
+# what you mean.
+# ignore = [
+#   "vendor",
+#   "third_party",
 #   "~/Code/Rust/EMBED/ESP",   # vendored toolchains, etc.
 # ]
-# ignore_names: directory names pruned anywhere in the tree. These add to the
-# built-ins (.git, node_modules, .jj), which are always pruned.
-# ignore_names = ["vendor", "third_party"]

@@ -5,7 +5,8 @@ use clap::{ArgMatches, Args, CommandFactory, FromArgMatches, Parser, parser::Val
 use crate::{
 	clean,
 	config::{self, Config},
-	discover::{WalkOptions, default_ignore_names, discover},
+	discover::{WalkOptions, discover},
+	ignore::IgnoreSet,
 	plan::build_plan,
 	util::{expand_tilde, parse_size},
 };
@@ -15,10 +16,10 @@ use crate::{
 /// and stray/orphaned build dirs are detected by cargo's `CACHEDIR.TAG`.
 #[derive(Parser)]
 #[command(
-	name = "rust-cleanup",
+	name = "rustsweep",
 	version,
 	about,
-	after_help = "Defaults for these options can be set in ~/.config/rust-cleanup/config.toml \
+	after_help = "Defaults for these options can be set in ~/.config/rustsweep/config.toml \
 (a command-line flag always wins). That file also holds the global ignore list; \
 --ignore adds to it rather than replacing it."
 )]
@@ -36,10 +37,12 @@ pub struct Cli {
 	#[arg(short = 'd', long, value_name = "DEPTH")]
 	pub max_depth: Option<usize>,
 
-	/// Never scan (or clean) anything inside this directory. Repeatable; adds to
-	/// the config file's ignore_paths rather than replacing it.
-	#[arg(long = "ignore", value_name = "PATH")]
-	pub ignore: Vec<PathBuf>,
+	/// Never scan (or clean) anything matching this .gitignore-style pattern: a
+	/// bare name (`vendor`) matches at any depth, anything else is a glob matched
+	/// against the full path (`~/Code/*/target`). Repeatable; adds to the config
+	/// file's `ignore` list rather than replacing it.
+	#[arg(long = "ignore", value_name = "PATTERN")]
+	pub ignore: Vec<String>,
 
 	#[command(flatten)]
 	pub flags: Flags,
@@ -49,17 +52,10 @@ pub struct Cli {
 /// small `Copy` bundle so it can be threaded through by value.
 #[derive(Args, Clone, Copy)]
 pub struct Flags {
-	/// Automatically clean non-Dioxus Rust projects without prompting
-	#[arg(long)]
-	pub yes_cargo: bool,
-
-	/// Automatically clean Dioxus projects without prompting
-	#[arg(long)]
-	pub yes_dioxus: bool,
-
-	/// Automatically clean all projects without prompting for a yes or a no
+	/// Clean everything found without prompting for a yes or a no. Command-line
+	/// only — this one can't be set in the config file
 	#[arg(short = 'y', long)]
-	pub yes_all: bool,
+	pub yes: bool,
 
 	/// Also remove Cargo build dirs that aren't inside any discovered project
 	/// (e.g. left over from `cargo build --target-dir <dir>`)
@@ -104,7 +100,7 @@ pub fn run_cli() {
 	let resolved = resolve(cli, &matches, cfg);
 
 	let discovery = discover(&resolved.path, resolved.walk);
-	let (workspaces, failed) = build_plan(&discovery.candidates);
+	let (workspaces, failed) = build_plan(&discovery.projects);
 	clean::run(resolved.flags, &discovery, &workspaces, &failed);
 }
 
@@ -120,44 +116,26 @@ struct Resolved {
 /// mean either "passed" or "absent"; the ignore lists are additive (config ∪ CLI)
 /// so nothing can quietly un-protect a directory.
 fn resolve(cli: Cli, matches: &ArgMatches, cfg: Config) -> Resolved {
-	let cfg_sets_autoclean = cfg.sets_autoclean();
-
 	let path = if from_cli(matches, "path") {
 		cli.path
 	} else {
 		cfg.path.map(expand_tilde).unwrap_or(cli.path)
 	};
 
-	let mut ignore_names = default_ignore_names();
-	ignore_names.extend(cfg.ignore_names);
-
-	let ignore_paths: Vec<PathBuf> = cfg
-		.ignore_paths
-		.into_iter()
-		.map(expand_tilde)
-		.chain(cli.ignore)
-		.filter_map(|p| match p.canonicalize() {
-			Ok(canon) => Some(canon),
-			// A nonexistent ignore path protects nothing, so it's harmless — but say so,
-			// since the user probably meant it to match something.
-			Err(e) => {
-				eprintln!("Warning: ignoring unusable ignore path {}: {e}", p.display());
-				None
-			}
-		})
-		.collect();
+	// Additive on purpose: --ignore extends the config's list, so a command line can
+	// never quietly un-protect a directory the config named.
+	let patterns: Vec<String> = cfg.ignore.into_iter().chain(cli.ignore).collect();
 
 	let walk = WalkOptions {
 		follow_symlinks: merge_bool(matches, "follow_symlinks", cli.follow_symlinks, cfg.follow_symlinks),
 		max_depth: cli.max_depth.or(cfg.max_depth),
-		ignore_names,
-		ignore_paths,
+		ignore: IgnoreSet::build(&patterns),
 	};
 
 	let flags = Flags {
-		yes_cargo: merge_bool(matches, "yes_cargo", cli.flags.yes_cargo, cfg.yes_cargo),
-		yes_dioxus: merge_bool(matches, "yes_dioxus", cli.flags.yes_dioxus, cfg.yes_dioxus),
-		yes_all: merge_bool(matches, "yes_all", cli.flags.yes_all, cfg.yes_all),
+		// Deliberately not configurable: deleting without a prompt is the one thing
+		// here you can't undo, so it has to be asked for on the command line, per run.
+		yes: cli.flags.yes,
 		orphans: merge_bool(matches, "orphans", cli.flags.orphans, cfg.orphans),
 		dry_run: merge_bool(matches, "dry_run", cli.flags.dry_run, cfg.dry_run),
 		verbose: merge_bool(matches, "verbose", cli.flags.verbose, cfg.verbose),
@@ -168,17 +146,6 @@ fn resolve(cli: Cli, matches: &ArgMatches, cfg: Config) -> Resolved {
 			.keep_size
 			.or_else(|| config_keep_size(cfg.keep_size.as_deref())),
 	};
-
-	// Auto-cleaning deletes without asking. When that came from the config rather
-	// than this command line, say so — it should never be a silent surprise.
-	if cfg_sets_autoclean && !flags.dry_run {
-		let from_command_line = ["yes_all", "yes_cargo", "yes_dioxus"]
-			.iter()
-			.any(|id| from_cli(matches, id));
-		if !from_command_line {
-			println!("Auto-cleaning without prompts (enabled by the config file).");
-		}
-	}
 
 	Resolved { path, walk, flags }
 }
@@ -237,11 +204,11 @@ mod tests {
 	/// silently break — so assert the ids exist and resolve.
 	#[test]
 	fn flag_ids_are_the_field_names() {
-		let matches = Cli::command().get_matches_from(["rust-cleanup", "--orphans", "--show-size"]);
+		let matches = Cli::command().get_matches_from(["rustsweep", "--orphans", "--show-size"]);
 
 		for id in [
-			"path", "follow_symlinks", "max_depth", "ignore", "yes_cargo", "yes_dioxus", "yes_all", "orphans",
-			"dry_run", "verbose", "show_size", "keep_days", "keep_size",
+			"path", "follow_symlinks", "max_depth", "ignore", "yes", "orphans", "dry_run", "verbose", "show_size",
+			"keep_days", "keep_size",
 		] {
 			assert!(
 				matches.try_get_one::<bool>(id).is_ok() || matches.ids().any(|i| i.as_str() == id),
@@ -255,7 +222,7 @@ mod tests {
 
 	#[test]
 	fn config_fills_in_flags_the_cli_left_alone() {
-		let matches = Cli::command().get_matches_from(["rust-cleanup", "--orphans"]);
+		let matches = Cli::command().get_matches_from(["rustsweep", "--orphans"]);
 
 		assert!(merge_bool(&matches, "orphans", true, Some(false)), "CLI wins over config");
 		assert!(merge_bool(&matches, "verbose", false, Some(true)), "config enables it");

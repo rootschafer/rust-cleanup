@@ -22,10 +22,8 @@ pub(crate) fn run(flags: Flags, discovery: &Discovery, workspaces: &[Workspace],
 		println!("Dry run — nothing will be deleted.");
 	}
 
-	let mut skipped: Vec<PathBuf> = Vec::new();
+	let mut tally = Tally::default();
 	let mut already_clean = 0usize;
-	let mut kept_by_filter = 0usize;
-	let mut freed = 0u64; // estimated bytes cleaned (only meaningful with --show-size)
 
 	// Pass 1: clean each distinct workspace/standalone project once, using the
 	// build directory cargo itself resolved (so relocated build dirs are handled).
@@ -39,36 +37,7 @@ pub(crate) fn run(flags: Flags, discovery: &Discovery, workspaces: &[Workspace],
 		if !cleaned.insert(canonical_or(&ws.target_dir)) {
 			continue; // this build dir was already cleaned via another project
 		}
-		let measured = measure_if_needed(&ws.target_dir, flags);
-		if !filters_allow(measured, flags) {
-			kept_by_filter += 1;
-			continue;
-		}
-		let size = measured.map_or(0, |(bytes, _)| bytes);
-
-		if flags.dry_run {
-			println!(
-				"Would clean {} ({} project) — build dir {}",
-				ws.root.display(),
-				ws.kind.display_name(),
-				with_size(&ws.target_dir, measured, flags),
-			);
-			freed += size;
-			continue;
-		}
-
-		let question = format!(
-			"{} is a {} project (build dir: {}). Clean it?",
-			ws.root.display(),
-			ws.kind.display_name(),
-			with_size(&ws.target_dir, measured, flags),
-		);
-		if ws.kind.should_autoclean(flags) || prompt(&question) {
-			cargo_clean(&ws.root);
-			freed += size;
-		} else {
-			skipped.push(ws.root.clone());
-		}
+		tally.consider(Target::Project { root: &ws.root }, &ws.target_dir, flags);
 	}
 
 	// Pass 2: every Cargo build dir we found that ISN'T some project's resolved
@@ -85,92 +54,112 @@ pub(crate) fn run(flags: Flags, discovery: &Discovery, workspaces: &[Workspace],
 		if resolved.contains(build_dir) {
 			continue; // the real build dir of a project — handled by pass 1
 		}
-
-		match containing_project(build_dir, &discovery.candidates) {
+		match containing_project(build_dir, &discovery.projects) {
 			// Leftover sitting inside a known project: confidently that project's.
-			Some(project) => {
-				let measured = measure_if_needed(build_dir, flags);
-				if !filters_allow(measured, flags) {
-					kept_by_filter += 1;
-					continue;
-				}
-				let size = measured.map_or(0, |(bytes, _)| bytes);
-				if flags.dry_run {
-					println!(
-						"Would remove stray build dir {} (inside {})",
-						with_size(build_dir, measured, flags),
-						project.dir.display(),
-					);
-					freed += size;
-					continue;
-				}
-				let question = format!(
-					"{} is a stray Cargo build dir (not {}'s current build dir). Remove it?",
-					with_size(build_dir, measured, flags),
-					project.dir.display(),
-				);
-				if project.kind.should_autoclean(flags) || prompt(&question) {
-					remove_dir(build_dir);
-					freed += size;
-				} else {
-					skipped.push(build_dir.clone());
-				}
-			}
+			Some(project) => tally.consider(Target::Stray { project }, build_dir, flags),
 			// Not inside any project: ambiguous, so only touch it behind --orphans.
-			None => {
-				if !flags.orphans {
-					detached_found += 1;
-					continue;
-				}
-				let measured = measure_if_needed(build_dir, flags);
-				if !filters_allow(measured, flags) {
-					kept_by_filter += 1;
-					continue;
-				}
-				let size = measured.map_or(0, |(bytes, _)| bytes);
-				if flags.dry_run {
-					println!("Would remove orphaned build dir {}", with_size(build_dir, measured, flags),);
-					freed += size;
-					continue;
-				}
-				let question = format!(
-					"{} is an orphaned Cargo build dir with no associated project. Remove it?",
-					with_size(build_dir, measured, flags),
-				);
-				if flags.yes_all || prompt(&question) {
-					remove_dir(build_dir);
-					freed += size;
-				} else {
-					skipped.push(build_dir.clone());
-				}
-			}
+			None if flags.orphans => tally.consider(Target::Orphan, build_dir, flags),
+			None => detached_found += 1,
 		}
 	}
 
 	if flags.show_size {
 		let verb = if flags.dry_run { "Would free" } else { "Freed" };
-		println!("{verb} ~{}.", human_size(freed));
+		println!("{verb} ~{}.", human_size(tally.freed));
 	}
 
 	print_summary(&Summary {
 		already_clean,
-		kept_by_filter,
+		kept_by_filter: tally.kept_by_filter,
 		detached_found,
 		orphans_enabled: flags.orphans,
-		skipped: &skipped,
+		skipped: &tally.skipped,
 		failed,
 		verbose: flags.verbose,
 	});
 }
 
+/// What a build directory is to us, which decides both how we describe it and
+/// how it gets removed.
+enum Target<'a> {
+	/// A project's current build dir — `cargo clean` handles it, from `root`.
+	Project { root: &'a Path },
+	/// A leftover build dir sitting inside a project it no longer belongs to.
+	Stray { project: &'a Path },
+	/// A build dir with no project around it at all.
+	Orphan,
+}
+
+/// What the run added up to, accumulated as build dirs are handled.
+#[derive(Default)]
+struct Tally {
+	/// Estimated bytes cleaned (only meaningful with `--show-size`).
+	freed: u64,
+	kept_by_filter: usize,
+	skipped: Vec<PathBuf>,
+}
+
+impl Tally {
+	/// Runs one build dir through the whole decision: measure if a filter or
+	/// `--show-size` needs it, apply the filters, then report it (`--dry-run`),
+	/// delete it (`--yes`), or ask. Every removal in the program goes through here.
+	fn consider(&mut self, target: Target, build_dir: &Path, flags: Flags) {
+		let measured = measure_if_needed(build_dir, flags);
+		if !filters_allow(measured, flags) {
+			self.kept_by_filter += 1;
+			return;
+		}
+		let size = measured.map_or(0, |(bytes, _)| bytes);
+		let sized = with_size(build_dir, measured, flags);
+
+		if flags.dry_run {
+			match &target {
+				Target::Project { root } => {
+					println!("Would clean {} (Cargo project) — build dir {sized}", root.display())
+				}
+				Target::Stray { project } => {
+					println!("Would remove stray build dir {sized} (inside {})", project.display())
+				}
+				Target::Orphan => println!("Would remove orphaned build dir {sized}"),
+			}
+			self.freed += size;
+			return;
+		}
+
+		let question = match &target {
+			Target::Project { root } => {
+				format!("{} is a Cargo project (build dir: {sized}). Clean it?", root.display())
+			}
+			Target::Stray { project } => format!(
+				"{sized} is a stray Cargo build dir (not {}'s current build dir). Remove it?",
+				project.display(),
+			),
+			Target::Orphan => format!("{sized} is an orphaned Cargo build dir with no associated project. Remove it?"),
+		};
+
+		if !(flags.yes || prompt(&question)) {
+			// Name the project for a project, the directory itself otherwise — that's
+			// what the user just declined.
+			self.skipped.push(match target {
+				Target::Project { root } => root.to_path_buf(),
+				_ => build_dir.to_path_buf(),
+			});
+			return;
+		}
+
+		match target {
+			Target::Project { root } => cargo_clean(root),
+			Target::Stray { .. } | Target::Orphan => remove_dir(build_dir),
+		}
+		self.freed += size;
+	}
+}
+
 /// Measures a build dir only when a filter or `--show-size` needs it; otherwise
 /// returns `None` so a normal run pays nothing.
 fn measure_if_needed(build_dir: &Path, flags: Flags) -> Option<(u64, SystemTime)> {
-	if flags.keep_days.is_some() || flags.keep_size.is_some() || flags.show_size {
-		measure(build_dir)
-	} else {
-		None
-	}
+	let needed = flags.keep_days.is_some() || flags.keep_size.is_some() || flags.show_size;
+	needed.then(|| measure(build_dir))
 }
 
 /// Renders a build-dir path, appending its human size in parentheses when
@@ -226,7 +215,7 @@ fn filters_allow(measured: Option<(u64, SystemTime)>, flags: Flags) -> bool {
 
 /// Total size in bytes and newest file mtime under `dir`. Walks the whole tree
 /// (the inherent cost of size/age filtering); does not follow symlinks.
-fn measure(dir: &Path) -> Option<(u64, SystemTime)> {
+fn measure(dir: &Path) -> (u64, SystemTime) {
 	let mut total = 0u64;
 	let mut newest = SystemTime::UNIX_EPOCH;
 	let mut stack = vec![dir.to_path_buf()];
@@ -254,7 +243,7 @@ fn measure(dir: &Path) -> Option<(u64, SystemTime)> {
 		}
 	}
 
-	Some((total, newest))
+	(total, newest)
 }
 
 /// Whether `mtime` is within the last `days` days (clock skew into the future is
@@ -321,7 +310,7 @@ fn print_summary(summary: &Summary) {
 		println!("{} project(s) were already clean.", summary.already_clean);
 	}
 	if summary.kept_by_filter > 0 {
-		println!("{} build dir(s) kept by --keep-days/--keep-size.", summary.kept_by_filter,);
+		println!("{} build dir(s) kept by --keep-days/--keep-size.", summary.kept_by_filter);
 	}
 	if !summary.failed.is_empty() {
 		println!(

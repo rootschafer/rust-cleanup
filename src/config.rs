@@ -1,7 +1,11 @@
-//! The optional config file at `~/.config/rust-cleanup/config.toml`. Every key
+//! The optional config file at `~/.config/rustsweep/config.toml`. Every key
 //! is optional and mirrors a CLI flag; a command-line flag always wins over the
 //! config, which in turn wins over the built-in default. When the file is absent
 //! — the common case — behavior is exactly as if it didn't exist.
+//!
+//! `--yes` is deliberately absent: auto-cleaning is the one irreversible thing
+//! this tool does, so it has to be asked for per run rather than left armed in a
+//! file.
 
 use std::{env, path::PathBuf};
 
@@ -20,33 +24,20 @@ pub(crate) struct Config {
 	pub(crate) dry_run: Option<bool>,
 	pub(crate) verbose: Option<bool>,
 	pub(crate) show_size: Option<bool>,
-	pub(crate) yes_cargo: Option<bool>,
-	pub(crate) yes_dioxus: Option<bool>,
-	pub(crate) yes_all: Option<bool>,
 	pub(crate) keep_days: Option<u64>,
 	/// A human size like `500MB`; parsed with `util::parse_size` when merging.
 	pub(crate) keep_size: Option<String>,
-	/// Directory trees never scanned (a path prefix match, so descendants too).
-	pub(crate) ignore_paths: Vec<PathBuf>,
-	/// Directory names never descended into, anywhere in the tree.
-	pub(crate) ignore_names: Vec<String>,
+	/// `.gitignore`-style patterns for directories never scanned. See
+	/// [`crate::ignore`] for the matching rules.
+	pub(crate) ignore: Vec<String>,
 }
 
-impl Config {
-	/// Whether the config file is what turns on auto-cleaning, so a run can say so
-	/// rather than deleting without a prompt for reasons the command line doesn't
-	/// show.
-	pub(crate) fn sets_autoclean(&self) -> bool {
-		[self.yes_all, self.yes_cargo, self.yes_dioxus].contains(&Some(true))
-	}
-}
-
-/// Where the config lives: `$RUST_CLEANUP_CONFIG` if set (an escape hatch, and
-/// what the tests use), else `$XDG_CONFIG_HOME/rust-cleanup/config.toml`, else
-/// `~/.config/rust-cleanup/config.toml`. `None` when no home directory can be
+/// Where the config lives: `$RUSTSWEEP_CONFIG` if set (an escape hatch, and
+/// what the tests use), else `$XDG_CONFIG_HOME/rustsweep/config.toml`, else
+/// `~/.config/rustsweep/config.toml`. `None` when no home directory can be
 /// determined at all.
 pub(crate) fn config_path() -> Option<PathBuf> {
-	if let Some(explicit) = env::var_os("RUST_CLEANUP_CONFIG") {
+	if let Some(explicit) = env::var_os("RUSTSWEEP_CONFIG") {
 		return Some(PathBuf::from(explicit));
 	}
 	let base = env::var_os("XDG_CONFIG_HOME")
@@ -54,7 +45,7 @@ pub(crate) fn config_path() -> Option<PathBuf> {
 		.filter(|p| p.is_absolute())
 		.or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
 		.or_else(|| env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join(".config")))?;
-	Some(base.join("rust-cleanup").join("config.toml"))
+	Some(base.join("rustsweep").join("config.toml"))
 }
 
 /// Loads the config. A missing file is the normal case and yields defaults. A
@@ -98,8 +89,7 @@ mod tests {
 			show_size = true
 			keep_days = 14
 			keep_size = "500MiB"
-			ignore_paths = ["/tmp/skip"]
-			ignore_names = ["vendor"]
+			ignore = ["/tmp/skip", "vendor"]
 			"#,
 		)
 		.unwrap();
@@ -110,8 +100,7 @@ mod tests {
 		assert_eq!(cfg.orphans, Some(true));
 		assert_eq!(cfg.keep_days, Some(14));
 		assert_eq!(cfg.keep_size.as_deref(), Some("500MiB"));
-		assert_eq!(cfg.ignore_paths, vec![PathBuf::from("/tmp/skip")]);
-		assert_eq!(cfg.ignore_names, vec!["vendor".to_string()]);
+		assert_eq!(cfg.ignore, vec!["/tmp/skip".to_string(), "vendor".to_string()]);
 	}
 
 	#[test]
@@ -121,9 +110,7 @@ mod tests {
 		assert!(cfg.path.is_none());
 		assert!(cfg.orphans.is_none());
 		assert!(cfg.keep_size.is_none());
-		assert!(cfg.ignore_paths.is_empty());
-		assert!(cfg.ignore_names.is_empty());
-		assert!(!cfg.sets_autoclean());
+		assert!(cfg.ignore.is_empty());
 	}
 
 	#[test]
@@ -133,9 +120,10 @@ mod tests {
 	}
 
 	#[test]
-	fn autoclean_is_detected() {
-		assert!(parse("yes_all = true").unwrap().sets_autoclean());
-		assert!(parse("yes_dioxus = true").unwrap().sets_autoclean());
-		assert!(!parse("yes_all = false").unwrap().sets_autoclean());
+	fn yes_is_not_a_config_key() {
+		assert!(
+			parse("yes = true").is_err(),
+			"auto-clean must stay a command-line-only decision"
+		);
 	}
 }

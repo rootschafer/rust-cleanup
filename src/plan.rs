@@ -8,17 +8,13 @@ use cargo_metadata::MetadataCommand;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
-use crate::{
-	discover::{Candidate, ProjectType},
-	util::canonical_or,
-};
+use crate::util::canonical_or;
 
 /// A distinct thing to clean: one standalone crate or one workspace, together
 /// with the build directory cargo resolved for it.
 pub(crate) struct Workspace {
 	pub(crate) root: PathBuf,
 	pub(crate) target_dir: PathBuf,
-	pub(crate) kind: ProjectType,
 }
 
 /// Resolves the candidates into a set of distinct clean jobs by asking `cargo
@@ -31,10 +27,10 @@ pub(crate) struct Workspace {
 /// their non-member children can be judged, so we do it in two parallel batches:
 /// first every workspace root (identified by a cheap `[workspace]` line-scan,
 /// no cargo spawn), then the remaining standalone crates once coverage is known.
-pub(crate) fn build_plan(candidates: &[Candidate]) -> (Vec<Workspace>, Vec<(PathBuf, String)>) {
+pub(crate) fn build_plan(projects: &[PathBuf]) -> (Vec<Workspace>, Vec<(PathBuf, String)>) {
 	// The slow phase: one `cargo metadata` per uncovered project. We know the total
 	// up front, so this gets a real progress bar with an ETA.
-	let progress = ProgressBar::new(candidates.len() as u64);
+	let progress = ProgressBar::new(projects.len() as u64);
 	progress.set_style(
 		ProgressStyle::with_template("{spinner:.green} Resolving projects [{bar:30.cyan/blue}] {pos}/{len} ({eta})")
 			.unwrap()
@@ -43,9 +39,9 @@ pub(crate) fn build_plan(candidates: &[Candidate]) -> (Vec<Workspace>, Vec<(Path
 	progress.enable_steady_tick(Duration::from_millis(120));
 
 	// Batch 1: resolve every workspace root in parallel.
-	let (roots, non_roots): (Vec<&Candidate>, Vec<&Candidate>) = candidates
+	let (roots, non_roots): (Vec<&PathBuf>, Vec<&PathBuf>) = projects
 		.iter()
-		.partition(|c| manifest_is_workspace_root(&c.dir));
+		.partition(|dir| manifest_is_workspace_root(dir));
 	let root_results = resolve_in_parallel(&roots, &progress);
 
 	let mut workspaces: Vec<Workspace> = Vec::new();
@@ -55,24 +51,20 @@ pub(crate) fn build_plan(candidates: &[Candidate]) -> (Vec<Workspace>, Vec<(Path
 	// non-member descendants are crates cargo rejects as detached; we skip them.
 	let mut handled_roots: Vec<PathBuf> = Vec::new();
 
-	for (candidate, result) in root_results {
+	for (project, result) in root_results {
 		match result {
 			Ok((root, target_dir, member_dirs)) => {
 				handled_roots.push(canonical_or(&root));
-				covered.extend(member_dirs.iter().cloned());
-				workspaces.push(Workspace {
-					root,
-					target_dir,
-					kind: workspace_kind(candidate.kind, &member_dirs),
-				});
+				covered.extend(member_dirs);
+				workspaces.push(Workspace { root, target_dir });
 			}
 			// A broken workspace root; record it and skip its members below.
 			Err(e) => {
-				handled_roots.push(candidate.dir.clone());
-				failed.push((candidate.dir.clone(), e));
+				handled_roots.push(project.clone());
+				failed.push((project.clone(), e));
 			}
 		}
-		covered.insert(candidate.dir.clone());
+		covered.insert(project.clone());
 	}
 
 	// Batch 2: the remaining crates that aren't members of, or detached children
@@ -81,13 +73,13 @@ pub(crate) fn build_plan(candidates: &[Candidate]) -> (Vec<Workspace>, Vec<(Path
 	// workspace when it's not"); its build dirs are still caught by the scan, so we
 	// don't waste a `cargo metadata` call on it.
 	let mut skipped = 0u64;
-	let standalone: Vec<&Candidate> = non_roots
+	let standalone: Vec<&PathBuf> = non_roots
 		.into_iter()
-		.filter(|c| {
-			let keep = !covered.contains(&c.dir)
+		.filter(|dir| {
+			let keep = !covered.contains(*dir)
 				&& !handled_roots
 					.iter()
-					.any(|root| c.dir.starts_with(root) && c.dir != *root);
+					.any(|root| dir.starts_with(root) && *dir != root);
 			if !keep {
 				skipped += 1;
 			}
@@ -96,16 +88,12 @@ pub(crate) fn build_plan(candidates: &[Candidate]) -> (Vec<Workspace>, Vec<(Path
 		.collect();
 	progress.inc(skipped);
 
-	for (candidate, result) in resolve_in_parallel(&standalone, &progress) {
+	for (project, result) in resolve_in_parallel(&standalone, &progress) {
 		match result {
 			// We don't fabricate a build dir on failure: the CACHEDIR.TAG scan handles
 			// any real one, whereas a fake resolved target would mask it from the scan.
-			Ok((root, target_dir, member_dirs)) => workspaces.push(Workspace {
-				root,
-				target_dir,
-				kind: workspace_kind(candidate.kind, &member_dirs),
-			}),
-			Err(e) => failed.push((candidate.dir.clone(), e)),
+			Ok((root, target_dir, _members)) => workspaces.push(Workspace { root, target_dir }),
+			Err(e) => failed.push((project.clone(), e)),
 		}
 	}
 
@@ -119,19 +107,19 @@ pub(crate) fn build_plan(candidates: &[Candidate]) -> (Vec<Workspace>, Vec<(Path
 	(workspaces, failed)
 }
 
-/// Runs `cargo metadata` for each candidate in parallel, advancing `progress`
-/// as results land. Errors are stringified for later reporting.
+/// Runs `cargo metadata` for each project in parallel, advancing `progress` as
+/// results land. Errors are stringified for later reporting.
 #[allow(clippy::type_complexity)]
 fn resolve_in_parallel<'a>(
-	candidates: &[&'a Candidate],
+	projects: &[&'a PathBuf],
 	progress: &ProgressBar,
-) -> Vec<(&'a Candidate, Result<(PathBuf, PathBuf, Vec<PathBuf>), String>)> {
-	candidates
+) -> Vec<(&'a PathBuf, Result<(PathBuf, PathBuf, Vec<PathBuf>), String>)> {
+	projects
 		.par_iter()
-		.map(|candidate| {
-			let result = resolve_workspace(&candidate.dir).map_err(|e| e.to_string());
+		.map(|dir| {
+			let result = resolve_workspace(dir).map_err(|e| e.to_string());
 			progress.inc(1);
-			(*candidate, result)
+			(*dir, result)
 		})
 		.collect()
 }
@@ -175,15 +163,4 @@ fn manifest_is_workspace_root(dir: &Path) -> bool {
 		.lines()
 		.map(str::trim)
 		.any(|line| line == "[workspace]" || line.starts_with("[workspace."))
-}
-
-/// A workspace counts as Dioxus if the triggering crate or any member carries a
-/// `Dioxus.toml`, so `--yes-dioxus` applies to it.
-fn workspace_kind(trigger_kind: ProjectType, member_dirs: &[PathBuf]) -> ProjectType {
-	let has_dioxus = trigger_kind == ProjectType::Dioxus || member_dirs.iter().any(|d| d.join("Dioxus.toml").exists());
-	if has_dioxus {
-		ProjectType::Dioxus
-	} else {
-		ProjectType::Rust
-	}
 }
