@@ -497,7 +497,8 @@ fn projects_sharing_one_build_dir_are_deduped() {
 		make_crate(&p, name);
 		write(
 			&p.join(".cargo/config.toml"),
-			&format!("[build]\ntarget-dir = \"{}\"\n", shared.display()),
+			// Literal string: a Windows path's `\U...` would be an invalid escape.
+			&format!("[build]\ntarget-dir = '{}'\n", shared.display()),
 		);
 	}
 	make_build_dir(&shared);
@@ -723,7 +724,9 @@ fn config_ignore_protects_a_subtree() {
 	make_crate(&normal, "normal");
 	make_build_dir(&normal.join("target"));
 
-	let cfg = format!("ignore = [\"{}\"]\n", t.path().join("skip").display());
+	// TOML literal strings (single quotes): a Windows path's backslashes would be
+	// invalid escapes in a basic string. Same below.
+	let cfg = format!("ignore = ['{}']\n", t.path().join("skip").display());
 	run_with_config(t.path(), &cfg, &["--yes"]);
 
 	assert!(skipped.join("target").exists(), "an ignored tree is never scanned");
@@ -771,7 +774,7 @@ fn cli_ignore_adds_to_the_configs_ignore_list() {
 		make_build_dir(&p.join("target"));
 	}
 
-	let cfg = format!("ignore = [\"{}\"]\n", t.path().join("from-config").display());
+	let cfg = format!("ignore = ['{}']\n", t.path().join("from-config").display());
 	let cli_ignore = t.path().join("from-cli");
 	run_with_config(t.path(), &cfg, &["--yes", "--ignore", cli_ignore.to_str().unwrap()]);
 
@@ -872,7 +875,7 @@ fn ignore_accepts_glob_patterns() {
 	make_crate(&normal, "kept");
 	make_build_dir(&normal.join("target"));
 
-	let cfg = format!("ignore = [\"{}/*/generated\"]\n", t.path().display());
+	let cfg = format!("ignore = ['{}/*/generated']\n", t.path().display());
 	run_with_config(t.path(), &cfg, &["--yes"]);
 
 	assert!(skipped.join("target").exists(), "the glob should prune a/generated");

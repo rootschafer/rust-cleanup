@@ -93,9 +93,25 @@ impl IgnoreSet {
 }
 
 /// A pattern with no separator and no glob syntax names a directory, and is
-/// matched by name at any depth — the `.gitignore` rule.
+/// matched by name at any depth — the `.gitignore` rule. On Windows `\` is a
+/// separator too, or a native path like `C:\Users\me\vendor` would be read as
+/// a bare name and silently never match. (Not on Unix, where `\` is a legal
+/// filename character.)
 fn is_bare_name(pattern: &str) -> bool {
-	!pattern.contains('/') && !pattern.contains(['*', '?', '[', ']', '{', '}'])
+	let has_separator = pattern.contains('/') || (cfg!(windows) && pattern.contains('\\'));
+	!has_separator && !pattern.contains(['*', '?', '[', ']', '{', '}'])
+}
+
+/// Rewrites `\` separators to `/` on Windows. Glob patterns must use `/` —
+/// globset reads `\` in a pattern as an escape — while the *paths* being
+/// matched are normalized by globset itself, so patterns are the only side we
+/// have to fix. A no-op on Unix.
+fn slashify(pattern: String) -> String {
+	if cfg!(windows) {
+		pattern.replace('\\', "/")
+	} else {
+		pattern
+	}
 }
 
 /// Anchors a pattern to an absolute path, since that's what it gets matched
@@ -107,17 +123,19 @@ fn absolute_pattern(pattern: &str) -> String {
 		// A plain path (no glob syntax) is canonicalized, so a pattern written
 		// through a symlink still matches the real directory the walk reports.
 		if !pattern.contains(['*', '?', '[', ']', '{', '}']) {
-			return canonical_or(&expanded).to_string_lossy().into_owned();
+			return slashify(canonical_or(&expanded).to_string_lossy().into_owned());
 		}
-		return expanded.to_string_lossy().into_owned();
+		return slashify(expanded.to_string_lossy().into_owned());
 	}
 	let text = expanded.to_string_lossy().into_owned();
 	if text.starts_with("./") || text.starts_with("../") {
-		return std::env::current_dir()
-			.map(|cwd| cwd.join(&text).to_string_lossy().into_owned())
-			.unwrap_or(text);
+		return slashify(
+			std::env::current_dir()
+				.map(|cwd| cwd.join(&text).to_string_lossy().into_owned())
+				.unwrap_or(text),
+		);
 	}
-	format!("**/{text}")
+	slashify(format!("**/{text}"))
 }
 
 #[cfg(test)]
@@ -144,6 +162,10 @@ mod tests {
 		assert!(!ignores(&["vendor"], "/home/me/vendored"));
 	}
 
+	// The two tests below write Unix-style absolute paths, which aren't absolute
+	// paths on Windows at all — their Windows behavior is covered by the
+	// integration tests, which build patterns from real native paths.
+	#[cfg(unix)]
 	#[test]
 	fn an_absolute_pattern_matches_the_dir_and_its_contents() {
 		assert!(ignores(&["/opt/toolchains"], "/opt/toolchains"));
@@ -151,6 +173,7 @@ mod tests {
 		assert!(!ignores(&["/opt/toolchains"], "/opt/other"));
 	}
 
+	#[cfg(unix)]
 	#[test]
 	fn globs_are_supported() {
 		assert!(ignores(&["/home/*/scratch"], "/home/me/scratch"));
@@ -172,5 +195,21 @@ mod tests {
 			"bare names must stay off the glob path so ordinary runs pay nothing"
 		);
 		assert!(IgnoreSet::build(&["/a/b".to_string()]).has_globs);
+	}
+
+	/// A user on Windows writes native paths, and both halves of that have to
+	/// work: the pattern must not be mistaken for a bare name, and its `\`
+	/// separators must survive compilation into a glob (globset would otherwise
+	/// read them as escapes).
+	#[cfg(windows)]
+	#[test]
+	fn a_native_windows_path_is_a_glob_not_a_bare_name() {
+		assert!(!is_bare_name(r"C:\Users\me\vendor"));
+		assert!(is_bare_name("vendor"), "a real bare name still is one");
+		assert_eq!(slashify(r"C:\Users\me\vendor".to_string()), "C:/Users/me/vendor");
+		assert!(
+			IgnoreSet::build(&[r"C:\Users\me\vendor".to_string()]).has_globs,
+			"a native path must compile into the glob set"
+		);
 	}
 }

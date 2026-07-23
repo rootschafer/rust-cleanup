@@ -60,7 +60,12 @@ mod tests {
 
 	#[test]
 	fn expands_a_leading_tilde() {
-		let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set in tests"));
+		// Same fallback the code uses: Windows runners set USERPROFILE, not HOME.
+		let home = PathBuf::from(
+			std::env::var_os("HOME")
+				.or_else(|| std::env::var_os("USERPROFILE"))
+				.expect("HOME or USERPROFILE is set in tests"),
+		);
 
 		assert_eq!(expand_tilde(PathBuf::from("~/Code")), home.join("Code"));
 		assert_eq!(expand_tilde(PathBuf::from("~")), home);
