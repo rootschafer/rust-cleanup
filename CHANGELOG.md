@@ -23,9 +23,15 @@ The first release with prebuilt binaries and an installer.
   against them by tests. The man page ships in the release archives.
 - Hidden `--completions <shell>` flag, printing a shell completion script for
   bash, zsh, fish, elvish, or PowerShell to stdout.
+- The test suite now also runs on Windows in CI, alongside Linux and macOS.
 - This changelog.
 
 ### Fixed
+
+- Ignore patterns written as native Windows paths were broken twice over: a
+  path like `C:\Users\me\vendor` contains no `/`, so it was read as a bare
+  directory name and never matched — and globset treats `\` in a pattern as an
+  escape character. Separators are now normalized on Windows.
 
 - `repository` and `homepage` in `Cargo.toml` pointed at a GitHub URL that does
   not resolve; the README's clone command had the same typo.

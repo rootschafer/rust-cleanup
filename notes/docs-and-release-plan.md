@@ -157,13 +157,14 @@ walkthrough, packaging pages (homebrew) as those channels appear.
 
 ## Also worth doing for "all users" (unordered)
 
-- **Windows CI job.** Windows users get release binaries today but tests
-  never run there. Blocker is only the `expand_tilde` unit test expecting
-  `$HOME`; give the test the same `HOME`-else-`USERPROFILE` fallback the
-  code already has, then add `windows-latest` to the ci.yml matrix.
+- ~~**Windows CI job.**~~ Done 2026-07-23 — and it was not just the
+  `expand_tilde` test. See the decisions log: adding the runner surfaced two
+  real Windows bugs in the ignore matcher plus TOML-escaping breakage in the
+  fixtures. Worth remembering that "add a CI target" found product bugs.
 - **Homebrew tap** via dist (`installers = [… "homebrew"]` + a
   `homebrew-tap` repo). Cheap once releases flow; big reach for Mac users.
-- Rename `LICENSE.txt` → `LICENSE` (pure convention; everything detects both).
+- ~~Rename `LICENSE.txt` → `LICENSE`~~ — done 2026-07-23; `dist plan`
+  confirms the archives still pick it up.
 
 ## Decisions log
 
@@ -184,14 +185,24 @@ walkthrough, packaging pages (homebrew) as those channels appear.
   repo stays a single package.
 - **Version lives in the man page** (2026-07-23) — accepted the re-bless step at
   release time rather than stripping it; documented in the README.
+- **Windows path patterns are normalized, Unix ones aren't** (2026-07-23) —
+  `\` counts as a separator and is rewritten to `/` **only** under
+  `cfg!(windows)`, because on Unix `\` is a legal filename character and
+  rewriting it would corrupt a valid pattern. globset normalizes the *paths* it
+  matches but not the *patterns*, so patterns are the only side we fix.
 
 ### Still open, all Anders'
 
-- **`git push`** — five commits ahead of `origin/main`. CI has never run green;
-  this is the first push that should.
-- **Tag `v0.1.4` and push it** — triggers a public release.
-- **Settings → Pages → Source: "GitHub Actions"** — one-time, manual, and the
-  docs deploy fails until it's done.
+- **Tag `v0.1.4` and push it** — triggers a public release. Do this after CI is
+  green on the Windows job.
 - **crates.io publish** — `cargo publish --dry-run` is clean; the name was
   unclaimed as of 2026-07-22, which is not a reservation.
-- Homebrew tap, Windows CI job (see "Also worth doing" above).
+- Homebrew tap (see "Also worth doing" above).
+
+### Done since this plan was written
+
+- `git push` — pushed 2026-07-23; CI green on Linux + macOS.
+- **Pages enabled** via `gh api -X POST repos/rootschafer/rustsweep/pages
+  -f build_type=workflow`, which turned out to be doable from the CLI rather
+  than needing the web UI. Site live at <https://rootschafer.github.io/rustsweep/>
+  (verified: 200, correct `<title>`, internal links resolve).

@@ -1,5 +1,8 @@
 # rustsweep
 
+[![CI](https://github.com/rootschafer/rustsweep/actions/workflows/ci.yml/badge.svg)](https://github.com/rootschafer/rustsweep/actions/workflows/ci.yml)
+[![Docs](https://github.com/rootschafer/rustsweep/actions/workflows/docs.yml/badge.svg)](https://rootschafer.github.io/rustsweep/)
+
 A simple tool to save space on your computer by cleaning up the build artifacts
 of Rust projects. Point it at a directory; it finds every Cargo project beneath
 it, cleans each workspace once, and also removes the stray build dirs `cargo
@@ -155,6 +158,11 @@ every push to `main`.
 mdbook serve docs      # live preview at http://localhost:3000
 mdbook build docs      # one-shot build into docs/book/ (gitignored)
 ```
+
+**The `docs` argument is not optional.** mdBook looks for `book.toml` in the
+current directory, so a bare `mdbook build` from the repo root fails with
+`failed to read .../src/SUMMARY.md` — it's reporting a path it inferred from
+the wrong directory, not a missing file. Pass `docs`, or `cd docs` first.
 
 `docs/src/cli-reference.md` is **generated** — see below. Everything else is
 hand-written. `configuration.md` pulls in the real `config.example.toml` with
