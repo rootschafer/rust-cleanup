@@ -108,13 +108,21 @@ fn blessing() -> bool {
 	std::env::var_os(BLESS_VAR).is_some_and(|v| !v.is_empty())
 }
 
+/// Reads a checked-in artifact, normalizing line endings.
+///
+/// These guards are about *content* — whether the file still says what the clap
+/// definitions render — not about which line ending the working tree uses.
+/// `.gitattributes` pins that to LF, but a checkout predating it (or one whose
+/// git config overrides it) would otherwise fail all three guards with a
+/// misleading "out of date", and blessing would rewrite every line.
 fn read(path: &Path) -> String {
-	fs::read_to_string(path).unwrap_or_else(|e| {
+	let text = fs::read_to_string(path).unwrap_or_else(|e| {
 		panic!(
 			"reading {}: {e}\nIf the file is missing, run `{BLESS_VAR}=1 cargo test` to generate it.",
 			path.display()
 		)
-	})
+	});
+	text.replace("\r\n", "\n")
 }
 
 /// Resolves against the manifest directory so these tests don't care about cwd.

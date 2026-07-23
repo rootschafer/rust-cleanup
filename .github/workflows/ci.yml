@@ -25,4 +25,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      # --no-fail-fast so one run reports every broken test binary. Without it
+      # cargo stops at the first, which hid the integration results behind a
+      # docs failure on the Windows job's first run.
+      - run: cargo test --no-fail-fast

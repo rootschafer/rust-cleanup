@@ -1,0 +1,11 @@
+# Pin the working tree to LF on every platform.
+#
+# Git on Windows checks out CRLF by default. The generators behind
+# tests/docs.rs emit LF, so without this a Windows checkout compares CRLF
+# files against LF renderings and fails all three doc guards with a
+# thoroughly misleading "no longer matches the clap definitions" — the docs
+# are fine; the checkout isn't. Blessing there would rewrite every line of
+# all three files.
+#
+# `text=auto` still lets git detect and leave binary files alone.
+* text=auto eol=lf
