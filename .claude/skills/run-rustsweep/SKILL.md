@@ -13,7 +13,7 @@ root.
 ## Prerequisites
 
 A Rust toolchain (`cargo` on PATH) — nothing else. Developed on macOS; the
-suite also runs on Linux in CI.
+suite also runs on Linux and Windows in CI.
 
 ## Build
 
