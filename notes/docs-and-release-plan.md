@@ -193,11 +193,22 @@ walkthrough, packaging pages (homebrew) as those channels appear.
 
 ### Still open, all Anders'
 
-- **Tag `v0.1.4` and push it** — triggers a public release. Do this after CI is
-  green on the Windows job.
+- **Tag `v0.1.4` and push it** — triggers a public release. CI is now green on
+  all three platforms, so this is unblocked.
 - **crates.io publish** — `cargo publish --dry-run` is clean; the name was
   unclaimed as of 2026-07-22, which is not a reservation.
 - Homebrew tap (see "Also worth doing" above).
+
+### A note on CI, since it burned two rounds
+
+Both times the Windows job failed, the failure was in the *harness*, not the
+product — and both times the error message pointed somewhere else. The doc
+guards reported "no longer matches the clap definitions" when the real cause
+was a CRLF checkout, and following their advice would have rewritten all three
+files. CI now runs `--no-fail-fast` so one round reports every broken binary;
+before that, a docs failure hid whether the integration suite passed on Windows
+at all. If a Windows-only failure looks like a content mismatch, suspect the
+environment first.
 
 ### Done since this plan was written
 

@@ -4,6 +4,14 @@
 > The tree is now **18 unit + 48 integration + 3 docs tests**, `dist plan`
 > announces **v0.1.4**, and `cargo publish --dry-run` is clean.
 >
+> **Everything is pushed and CI is green on Linux, macOS, and Windows**; the
+> book is live at <https://rootschafer.github.io/rustsweep/>. On Windows the
+> counts read 17 unit + 44 integration: four integration tests (symlinks,
+> and the unreadable-build-dir filter test, which needs `chmod`) and two
+> ignore-matcher unit tests are `#[cfg(unix)]`, and one is `#[cfg(windows)]`.
+> That asymmetry is expected — don't "fix" it. The only thing left before a
+> public release is tagging `v0.1.4`.
+>
 > Two things from §6 are resolved. **CI was red on its first run** — `cargo fmt
 > --check` failed on the runner because the repo had no `rustfmt.toml` and the
 > tabs/120-column style was coming from a machine-global config at

@@ -66,6 +66,7 @@ terminal-ish stdin.
 
 ```bash
 cargo test                     # 18 unit + 48 integration + 3 docs, ~2s
+                               # (Windows: 17 + 44 — some tests are cfg-gated)
 cargo clippy --all-targets     # silent
 cargo fmt --check
 ```
