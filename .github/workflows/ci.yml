@@ -25,6 +25,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      # Fails on a broken intra-doc link, so a bad crate-doc reaches neither
+      # docs.rs nor a release. Warnings-as-errors matches how docs.rs builds.
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
       # --no-fail-fast so one run reports every broken test binary. Without it
       # cargo stops at the first, which hid the integration results behind a
       # docs failure on the Windows job's first run.
