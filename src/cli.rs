@@ -207,8 +207,17 @@ mod tests {
 		let matches = Cli::command().get_matches_from(["rustsweep", "--orphans", "--show-size"]);
 
 		for id in [
-			"path", "follow_symlinks", "max_depth", "ignore", "yes", "orphans", "dry_run", "verbose", "show_size",
-			"keep_days", "keep_size",
+			"path",
+			"follow_symlinks",
+			"max_depth",
+			"ignore",
+			"yes",
+			"orphans",
+			"dry_run",
+			"verbose",
+			"show_size",
+			"keep_days",
+			"keep_size",
 		] {
 			assert!(
 				matches.try_get_one::<bool>(id).is_ok() || matches.ids().any(|i| i.as_str() == id),
