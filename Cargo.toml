@@ -1,6 +1,6 @@
 [package]
 name = "rustsweep"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "Frees disk space by cleaning the build artifacts of every Rust project under a directory, including the stray build dirs `cargo clean` can't reach."
 repository = "https://github.com/rootschafer/rustsweep"
