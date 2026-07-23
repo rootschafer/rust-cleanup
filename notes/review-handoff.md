@@ -1,5 +1,37 @@
 # Handoff: review & polish pass on `rustsweep`
 
+> **Addendum (2026-07-23, after stages 0–2 of `docs-and-release-plan.md`):**
+> The tree is now **18 unit + 48 integration + 3 docs tests**, `dist plan`
+> announces **v0.1.4**, and `cargo publish --dry-run` is clean.
+>
+> Two things from §6 are resolved. **CI was red on its first run** — `cargo fmt
+> --check` failed on the runner because the repo had no `rustfmt.toml` and the
+> tabs/120-column style was coming from a machine-global config at
+> `~/Library/Application Support/rustfmt/rustfmt.toml`. The style is now checked
+> in, stable-only keys, and stable and nightly rustfmt produce identical output.
+> Dropping the nightly-only `short_array_element_width_threshold` is why the
+> arg-id array in `cli.rs` is now vertical. **`repository`/`homepage` pointed at
+> `github.com/Rottschaferanders/rustsweep`, which does not exist** — the repo is
+> under `rootschafer`. Fixed in Cargo.toml and the README.
+>
+> New in the tree, all guarded rather than maintained by hand:
+> `CHANGELOG.md` (dist finds it on its own and uses the matching section as the
+> release body); `tests/docs.rs`, which renders the README usage block,
+> `docs/src/cli-reference.md`, and `docs/man/rustsweep.1` from
+> `cli::docs_command()` and diffs them — `UPDATE_DOCS=1 cargo test` re-blesses,
+> hand-editing any of the three is a test failure; a hidden `--completions
+> <shell>` flag; and an mdBook site under `docs/` deployed by
+> `.github/workflows/docs.yml`. Help wrapping is pinned at 100 columns from both
+> ends (`max_term_width` on the command, `term_width` in `docs_command`) so a
+> wide terminal can't produce help the checked-in copies don't match.
+>
+> **The man page embeds the version**, so a version bump without
+> `UPDATE_DOCS=1 cargo test` turns CI red. It's in the README's release steps.
+>
+> Still outstanding, all needing Anders: `git push`, tagging `v0.1.4`,
+> **repo Settings → Pages → Source: "GitHub Actions"** (the docs deploy 404s
+> until then), and the crates.io publish decision.
+>
 > **Addendum (2026-07-22, after the polish pass):** items 1, 2, 5, 6, and 7 of
 > §5 are done — `measure()` now reports incomplete reads and the filters keep
 > anything not fully measured (unit + integration tested); `freed` only counts
@@ -112,10 +144,12 @@ won't even say which test failed. To find it:
 ## 4. Verify with
 
 ```sh
-cargo test                     # 14 unit + 44 integration
+cargo test                     # 18 unit + 48 integration + 3 docs
 cargo clippy --all-targets     # must be silent
-cargo fmt --check
+cargo fmt --check              # uses the repo's rustfmt.toml, same as CI
 dist plan                      # release config still coherent
+mdbook build docs              # the book still builds
+.claude/skills/run-rustsweep/smoke.sh
 ```
 
 ## 5. Polish candidates, most-worth-it first
@@ -171,6 +205,13 @@ Nothing here is known-broken; these are the soft spots I'd look at.
 
 - **`.github/workflows/release.yml` is generated.** Edit `dist-workspace.toml`
   and re-run `dist generate`; hand edits get overwritten.
+- **The three generated doc artifacts** — the README's usage block (between the
+  `BEGIN GENERATED` / `END GENERATED` markers), `docs/src/cli-reference.md`, and
+  `docs/man/rustsweep.1`. `UPDATE_DOCS=1 cargo test` is the only way to change
+  them; `tests/docs.rs` fails otherwise.
+- **`rustfmt.toml` is stable-only on purpose.** Adding a nightly-only key puts
+  local formatting back out of step with CI, which is the bug it was added to
+  fix.
 - **Don't reintroduce project-type detection.** `dx clean` no longer exists, so
   Rust vs. Dioxus is a distinction without a difference. `ProjectType`,
   `Candidate`, and `workspace_kind` were deliberately deleted;

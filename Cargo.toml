@@ -13,7 +13,10 @@ categories = ["command-line-utilities", "development-tools::cargo-plugins"]
 # The book and its generated artifacts are for the website and the release
 # archives; nothing here is needed to build the crate. dist reads docs/man out
 # of the git checkout, not the packaged tarball, so excluding it is safe.
-exclude = ["notes/", "docs/", "config.example.toml"]
+# tests/docs.rs goes with docs/: it diffs the checked-in copies against the clap
+# definitions, so shipping it without its inputs would give a packaged crate a
+# test that cannot pass.
+exclude = ["notes/", "docs/", "tests/docs.rs", "config.example.toml"]
 
 [[bin]]
 name = "rustsweep"

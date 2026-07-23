@@ -6,9 +6,29 @@ mdBook is stable and Rust-native — decision is final, don't re-propose
 oranda). Companion to `review-handoff.md`, whose addendum lists what's already
 done. Ordered so each stage is useful on its own.
 
+> **Status (2026-07-23):** stages 0, 1, and 2 are **done and committed** on
+> `main`, except for the four steps that are Anders' to take: `git push`,
+> tagging `v0.1.4`, enabling GitHub Pages, and the crates.io publish. See the
+> per-stage notes below and the addendum in `review-handoff.md`.
+
 ---
 
 ## Stage 0 — land what exists (blocking everything else)
+
+**Done**, except push/tag. Commits: `054c26d` (rustfmt config), `3ae3d56` (repo
+URL), `3219e21` (notes), `6ad6f04` (changelog + 0.1.4 bump).
+
+Two things this stage turned up that the plan didn't anticipate:
+
+- **CI's first run was already red.** `cargo fmt --check` failed on the runner:
+  the repo had no `rustfmt.toml`, so the style came from a machine-global config
+  locally and from rustfmt's defaults in CI. Now checked in, stable-only keys,
+  stable and nightly agree.
+- **`repository`/`homepage` pointed at a URL that 404s** (`Rottschaferanders`;
+  the repo is under `rootschafer`). Fixed before it could reach crates.io.
+
+`cargo publish --dry-run` is clean. `dist` picks up `CHANGELOG.md` on its own —
+it ships in every archive and the matching section becomes the release body.
 
 1. Commit the pending work in logical commits: the polish pass (+ the
    `toml = "1"` bump), the `/run-rustsweep` skill, the notes. Tree is
@@ -26,6 +46,24 @@ done. Ordered so each stage is useful on its own.
    to rehearse; don't publish without an explicit go-ahead.
 
 ## Stage 1 — drift-proof CLI docs (the foundation, no website yet)
+
+**Done** — commit `dcc42b0`. All four items landed as specified, in
+`tests/docs.rs` (3 tests) plus `cli::docs_command()`. Deltas worth recording:
+
+- The README block renders **short** help (`-h`), not long. Long help puts each
+  option's full paragraph on its own lines — 60 lines for eleven flags, too much
+  for a front door, and its blank continuation lines carry trailing whitespace
+  that any editor would strip and break the guard on. The long form's content is
+  in the book's CLI reference instead.
+- **Wrapping had to be pinned from both ends** or the golden test would depend
+  on the terminal that ran it: `max_term_width = 100` on the command and
+  `term_width(100)` in `docs_command`. Needed clap's `wrap_help` feature.
+- **The man page embeds the version**, so a release bump requires a re-bless.
+  Added to the README's release steps rather than engineered around — the man
+  page should carry the version.
+- The stale-docs message is written to the stderr fd directly, since the harness
+  loses captured output when a failing assertion aborts on macOS (§3 of the
+  handoff). Verified by hand that the guidance shows.
 
 Principle: **the clap derive structs are the only source of truth.** Every
 doc artifact is generated from `Cli::command()` or guarded by a test that
@@ -52,6 +90,20 @@ Deliberately *not* an `xtask` workspace: at this size the bless-style tests
 double as the generator and the repo stays single-package.
 
 ## Stage 2 — the mdBook site on github.io
+
+**Done** — commit `e85bb3e`. Exactly the chapter layout below, built with mdBook
+0.5.4 (pinned in the workflow). `{{#include ../../config.example.toml}}` works
+as hoped — 0.5.4 allows an include that escapes the book root. All internal
+links and anchors were checked against the built HTML.
+
+Deltas: `docs.yml` also builds (without deploying) on pull requests, so a broken
+`SUMMARY.md` or dangling include fails in review rather than on `main`.
+`tests/docs.rs` had to join `docs/` in Cargo.toml's `exclude` — it diffs against
+files the package doesn't ship, so a packaged crate would otherwise carry a test
+that cannot pass.
+
+**Not done, and only Anders can do it: repo Settings → Pages → Source "GitHub
+Actions".** The deploy job 404s until that's set.
 
 Layout — book lives under `docs/`, so the repo root stays clean:
 
@@ -117,4 +169,26 @@ walkthrough, packaging pages (homebrew) as those channels appear.
 - **License: MIT** (Cargo.toml aligned to the committed LICENSE.txt,
   2026-07-22) — revisit only if dual MIT/Apache-2.0 was actually intended.
 - **Walk root is exempt from the ignore list** — documented + tested.
-- Still open: crates.io publish (Anders), Homebrew, Windows CI.
+- **`rustfmt.toml` is checked in, stable-only** (2026-07-23) — CI's first run
+  failed on `cargo fmt --check` because the style was only ever in a
+  contributor's machine-global config. Unstable keys are warned about rather
+  than applied by stable rustfmt, so keeping any would recreate the split.
+- **The README's usage block is short help, not long** (2026-07-23) — the long
+  form is 60 lines and its blank continuation lines carry trailing whitespace an
+  editor would strip, breaking the guard. Long help's content lives in the
+  book's CLI reference.
+- **No `xtask`** (as planned) — the bless-style tests are the generator, and the
+  repo stays a single package.
+- **Version lives in the man page** (2026-07-23) — accepted the re-bless step at
+  release time rather than stripping it; documented in the README.
+
+### Still open, all Anders'
+
+- **`git push`** — five commits ahead of `origin/main`. CI has never run green;
+  this is the first push that should.
+- **Tag `v0.1.4` and push it** — triggers a public release.
+- **Settings → Pages → Source: "GitHub Actions"** — one-time, manual, and the
+  docs deploy fails until it's done.
+- **crates.io publish** — `cargo publish --dry-run` is clean; the name was
+  unclaimed as of 2026-07-22, which is not a reservation.
+- Homebrew tap, Windows CI job (see "Also worth doing" above).
